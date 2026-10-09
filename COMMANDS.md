@@ -1,29 +1,54 @@
-# Passport Document Intelligence — Quick Start Guide
+# Passport Document Intelligence — COMMANDS (without-laya-model branch)
 
-Everything a new developer needs to get the project running from scratch.
+> **Branch:** `without-laya-model`
+> **Decision mode:** Fully deterministic — validation rules → policy engine → decision. No external ML model.
+> **What's here:** Fastest possible decision path. Expiry date, MRZ validity, image quality, and field consistency checks are all handled locally with zero network dependency.
+
+---
+
+## Branch Overview
+
+```
+without-laya-model
+  ├── Deterministic validation rules (always active)
+  │     ├── Expiry date check (compared against today's date)
+  │     ├── MRZ checksum validation
+  │     ├── Image quality check (blur, brightness, dimensions)
+  │     ├── Schema / field format validation
+  │     └── VIZ ↔ MRZ consistency
+  ├── Policy engine → final outcome (no external calls)
+  ├── Evidence ledger records validation + policy evidence
+  ├── Audit logging on every upload / extract / decision
+  ├── Celery beat: daily retention cleanup
+  └── GET /api/v1/batches/{id}/report endpoint
+```
+
+Other branches:
+- `master` — System One optional (disabled by default)
+- `with-laya-model` — System One enabled and fully wired
 
 ---
 
 ## Prerequisites
 
-Install these before anything else:
-
 | Tool | Version | Install |
 |------|---------|---------|
 | Python | 3.11+ | https://python.org |
-| uv | latest | `pip install uv` or https://docs.astral.sh/uv |
+| uv | latest | `pip install uv` |
 | Docker Desktop | latest | https://docker.com/products/docker-desktop |
-| Tesseract OCR | 5+ | See [OCR Setup](#ocr-setup) below |
+| Tesseract OCR | 5+ | See [OCR Setup](#ocr-setup) |
+
+No external API credentials needed.
 
 ---
 
 ## 1. Clone & Install
 
 ```bash
-git clone <repository-url>
-cd Passport-Document-Intelligence
+git clone git@github.com:Pavansai-Rangdal/passport-Document-Intelligence.git
+cd passport-Document-Intelligence
+git checkout without-laya-model
 
-# Install all Python dependencies
 uv sync
 ```
 
@@ -32,39 +57,32 @@ uv sync
 ## 2. Environment Configuration
 
 ```bash
-# Copy the example env file
 cp .env.example .env
 ```
 
-Open `.env` and update at minimum these values:
+Required changes in `.env`:
 
 ```env
-# Required — change these secrets before running
-SECRET_KEY=your-random-32-char-secret-here
-ENCRYPTION_KEY=your-random-32-char-key-here
+# Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+SECRET_KEY=your-random-32-char-secret
+ENCRYPTION_KEY=your-random-32-char-key
 
-# Database (defaults work if you use Docker below)
+# Database & Redis — defaults work with Docker below
 DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/passport_db
-
-# Redis (defaults work if you use Docker below)
 REDIS_URL=redis://localhost:6379/0
 
-# OCR engine: "tesseract", "paddle", or "both"
-OCR_ENGINE=tesseract
+# OCR engine
+OCR_ENGINE=tesseract   # or "paddle" or "both"
 ```
 
-Generate secure keys with:
-```bash
-python -c "import secrets; print(secrets.token_hex(32))"
-```
+No System One variables needed on this branch — they have been removed from the codebase.
 
 ---
 
-## 3. Start Infrastructure (Docker)
-
-Start PostgreSQL and Redis with a single command:
+## 3. Start Infrastructure
 
 ```bash
+# PostgreSQL
 docker run -d --name passport_db \
   -e POSTGRES_USER=postgres \
   -e POSTGRES_PASSWORD=postgres \
@@ -72,12 +90,13 @@ docker run -d --name passport_db \
   -p 5432:5432 \
   postgres:16-alpine
 
+# Redis (required for Celery beat retention cleanup)
 docker run -d --name passport_redis \
   -p 6379:6379 \
   redis:7-alpine
 ```
 
-Verify both are running:
+Verify:
 ```bash
 docker ps
 ```
@@ -90,6 +109,21 @@ docker ps
 uv run alembic upgrade head
 ```
 
+### Migrating from master or with-laya-model?
+
+If you previously ran migrations on `master` or `with-laya-model`, the
+`decision_records` table has two extra columns (`system_one_recommendation`,
+`system_one_confidence`) that no longer exist in this branch's model.
+Drop them with:
+
+```bash
+# Generate and apply the drop-columns migration
+uv run alembic revision --autogenerate -m "drop system_one columns"
+uv run alembic upgrade head
+```
+
+Fresh install (no prior database): just run `uv run alembic upgrade head` as normal.
+
 ---
 
 ## 5. Start the API Server
@@ -98,21 +132,29 @@ uv run alembic upgrade head
 uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The API is now available at:
-- **API root**: http://localhost:8000
-- **Swagger UI** (interactive docs): http://localhost:8000/docs
-- **ReDoc**: http://localhost:8000/redoc
+- API: http://localhost:8000
+- Swagger UI: http://localhost:8000/docs
+- ReDoc: http://localhost:8000/redoc
 
 ---
 
-## 6. OCR Setup
+## 6. Start Celery Worker + Beat
 
-The system needs at least one OCR engine.
+```bash
+# Terminal 1 — processes tasks
+uv run celery -A app.workers worker --loglevel=info
 
-### Tesseract (recommended for development)
+# Terminal 2 — daily retention scheduler
+uv run celery -A app.workers beat --loglevel=info
+```
 
-**Windows:** Download and install from https://github.com/UB-Mannheim/tesseract/wiki  
-Then add the install directory (e.g. `C:\Program Files\Tesseract-OCR`) to your system PATH.
+---
+
+## OCR Setup
+
+### Tesseract
+
+**Windows:** Download from https://github.com/UB-Mannheim/tesseract/wiki — add to system PATH.
 
 **macOS:**
 ```bash
@@ -124,12 +166,12 @@ brew install tesseract
 sudo apt-get install tesseract-ocr
 ```
 
-Verify installation:
+Verify:
 ```bash
 tesseract --version
 ```
 
-### PaddleOCR (optional, GPU-capable)
+### PaddleOCR (optional)
 
 ```bash
 uv sync --extra ocr-paddle
@@ -144,49 +186,68 @@ uv sync --extra ocr-paddle
 curl http://localhost:8000/health
 ```
 
-### Upload a Passport Document
+### Upload Document
 ```bash
 curl -X POST http://localhost:8000/api/v1/upload \
   -F "file=@/path/to/passport.jpg"
 ```
 
-Response includes `document_id` — use it in subsequent calls.
-
-### Extract Data from Document
+### Extract Data
 ```bash
 curl -X POST http://localhost:8000/api/v1/documents/{document_id}/extract
 ```
 
-### Make a Decision
+### Make Decision (deterministic, instant)
 ```bash
 curl -X POST http://localhost:8000/api/v1/documents/{document_id}/decide
 ```
 
-### Create a Batch
-```bash
-curl -X POST http://localhost:8000/api/v1/batches
+Response on this branch — no System One fields:
+```json
+{
+  "decision_id": "uuid",
+  "outcome": "pass_screening",
+  "confidence": 0.87,
+  "reasoning": "Document passed all validation rules",
+  "policy_version": "1.0",
+  "triggered_rules": [],
+  "validation_summary": {}
+}
 ```
 
-### Get Batch Status
+`confidence` is calculated as the fraction of validation rules that passed.
+
+### Batch Operations
 ```bash
+curl -X POST http://localhost:8000/api/v1/batches
 curl http://localhost:8000/api/v1/batches/{batch_id}
+curl http://localhost:8000/api/v1/batches/{batch_id}/report
 ```
+
+---
+
+## How Decisions Are Made (No ML)
+
+The policy engine applies these rules **in order**, stopping at the first match:
+
+| Priority | Rule | Outcome |
+|----------|------|---------|
+| 1 | Critical validation error (e.g. passport expired, bad checksum) | `FAIL_RULE` |
+| 2 | Validation warnings (e.g. low image quality) | `REVIEW_REQUIRED` |
+| 3 | MRZ not detected | `INSUFFICIENT_DATA` |
+| 4 | All validations passed | `PASS_SCREENING` |
+
+The expiry date check runs as part of step 1 — if `expiry_date` from OCR is in the past,
+it triggers a critical error and the document immediately gets `FAIL_RULE`.
 
 ---
 
 ## Testing
 
 ```bash
-# Run all tests
 uv run pytest
-
-# Run with verbose output
 uv run pytest -v
-
-# Run with coverage report
 uv run pytest --cov=app --cov-report=html
-
-# Run a specific test file
 uv run pytest tests/test_validation_rules.py -v
 ```
 
@@ -195,49 +256,10 @@ uv run pytest tests/test_validation_rules.py -v
 ## Code Quality
 
 ```bash
-# Lint
 uv run ruff check app/
-
-# Auto-fix lint errors
 uv run ruff check app/ --fix
-
-# Format code
 uv run ruff format app/
-
-# Type check
 uv run mypy app/
-```
-
----
-
-## Background Worker (Celery)
-
-If you need background task processing, start the Celery worker in a separate terminal:
-
-```bash
-uv run celery -A app.workers worker --loglevel=info
-```
-
-This requires Redis to be running.
-
----
-
-## Full Docker Compose (Production-like)
-
-If a `docker-compose.yml` is present:
-
-```bash
-# Start all services
-docker-compose up -d
-
-# Run migrations inside the container
-docker-compose exec web uv run alembic upgrade head
-
-# View logs
-docker-compose logs -f
-
-# Stop everything
-docker-compose down
 ```
 
 ---
@@ -245,76 +267,82 @@ docker-compose down
 ## Database Migrations
 
 ```bash
-# Apply all pending migrations
-uv run alembic upgrade head
+uv run alembic upgrade head        # Apply all pending migrations
+uv run alembic downgrade -1        # Roll back one
+uv run alembic downgrade base      # Roll back everything
+uv run alembic current             # Show current state
 
-# Roll back one migration
-uv run alembic downgrade -1
-
-# Roll back everything
-uv run alembic downgrade base
-
-# Check current migration state
-uv run alembic current
+# Generate a new migration after model changes
+uv run alembic revision --autogenerate -m "description"
 ```
 
 ---
 
-## Troubleshooting
+## Docker Compose (Full Stack)
 
-### `password authentication failed for user "postgres"`
-PostgreSQL credentials in `.env` don't match the running container.  
-Check: `DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/passport_db`
-
-### `No OCR engine available`
-Tesseract is not installed or not on PATH.  
-Run `tesseract --version` to verify. On Windows, check your system PATH.
-
-### `connection refused` on port 5432 or 6379
-PostgreSQL or Redis isn't running. Check with `docker ps` and restart if needed:
 ```bash
-docker start passport_db passport_redis
-```
-
-### Import errors or missing packages
-```bash
-uv sync
-```
-
-### Clear Python cache
-```bash
-find . -type d -name __pycache__ -exec rm -rf {} +
+docker-compose up -d
+docker-compose exec web uv run alembic upgrade head
+docker-compose logs -f
+docker-compose down
 ```
 
 ---
 
 ## Decision Outcomes
 
-The system returns one of four outcomes for each document:
-
-| Outcome | Meaning |
+| Outcome | Trigger |
 |---------|---------|
-| `PASS_SCREENING` | All validations passed |
-| `FAIL_RULE` | Failed a critical validation rule |
-| `REVIEW_REQUIRED` | Warnings present or low confidence |
-| `INSUFFICIENT_DATA` | Missing critical data (e.g. no MRZ) |
+| `PASS_SCREENING` | All validation rules passed |
+| `FAIL_RULE` | Critical error (expired passport, bad MRZ checksum, etc.) |
+| `REVIEW_REQUIRED` | Warnings (image quality, minor inconsistencies) |
+| `INSUFFICIENT_DATA` | MRZ not detected in image |
 
 ---
 
-## Key Environment Variables Reference
+## Key Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/passport_db` | PostgreSQL connection |
-| `REDIS_URL` | `redis://localhost:6379/0` | Redis connection |
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@localhost:5432/passport_db` | PostgreSQL |
+| `REDIS_URL` | `redis://localhost:6379/0` | Redis |
 | `OCR_ENGINE` | `both` | `tesseract`, `paddle`, or `both` |
-| `SECRET_KEY` | *(must change)* | Signing key |
-| `ENCRYPTION_KEY` | *(must change)* | Encryption key for sensitive fields |
-| `STORAGE_PATH` | `data/uploads` | Where uploaded files are stored |
-| `STORAGE_MAX_FILE_SIZE` | `10485760` | Max upload size in bytes (10 MB) |
-| `RETENTION_DAYS` | `90` | Days before uploaded files are purged |
-| `SYSTEM_ONE_ENABLED` | `false` | Enable external decision model |
-| `SYSTEM_ONE_API_URL` | *(empty)* | System One API endpoint |
-| `SYSTEM_ONE_API_KEY` | *(empty)* | System One API key |
+| `SECRET_KEY` | *(change this)* | Signing key |
+| `ENCRYPTION_KEY` | *(change this)* | Field encryption key |
+| `STORAGE_PATH` | `data/uploads` | Upload storage |
+| `STORAGE_MAX_FILE_SIZE` | `10485760` | Max upload (10 MB) |
+| `RETENTION_DAYS` | `90` | Days before files are purged |
 | `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR` |
 | `LOG_FORMAT` | `json` | `json` or `text` |
+
+---
+
+## Troubleshooting
+
+### `password authentication failed`
+Check `DATABASE_URL` in `.env` matches your Docker credentials.
+
+### `No OCR engine available`
+Run `tesseract --version`. On Windows, verify Tesseract is on system PATH.
+
+### `connection refused` on 5432 or 6379
+```bash
+docker start passport_db passport_redis
+```
+
+### Import errors
+```bash
+uv sync
+find . -type d -name __pycache__ -exec rm -rf {} +
+```
+
+### Alembic `column does not exist` error
+You have leftover `system_one_*` columns from a prior branch. Run:
+```bash
+uv run alembic revision --autogenerate -m "drop system_one columns"
+uv run alembic upgrade head
+```
+
+### Celery beat not running retention
+Ensure both `celery worker` and `celery beat` are running.
+Check Redis: `redis-cli ping`
