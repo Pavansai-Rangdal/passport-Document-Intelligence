@@ -116,28 +116,6 @@ class EvidenceLedger:
         )
 
     @staticmethod
-    async def add_system_one_evidence(
-        session: AsyncSession,
-        document_id: str,
-        recommendation: str,
-        confidence: float,
-        response_data: dict[str, Any],
-    ) -> Evidence:
-        """Add System One decision evidence."""
-        return await EvidenceLedger.add_evidence(
-            session=session,
-            document_id=document_id,
-            evidence_type=EvidenceType.SYSTEM_ONE_DECISION,
-            source="system_one",
-            data={
-                "recommendation": recommendation,
-                "confidence": confidence,
-                "response": response_data,
-            },
-            confidence=confidence,
-        )
-
-    @staticmethod
     async def add_policy_evidence(
         session: AsyncSession,
         document_id: str,

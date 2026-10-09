@@ -89,12 +89,6 @@ class Settings(BaseSettings):
     enable_lost_stolen_check: bool = False
     verification_timeout_seconds: int = 30
 
-    # System One Integration
-    system_one_enabled: bool = False
-    system_one_api_url: str = ""
-    system_one_api_key: str = ""
-    system_one_timeout_seconds: int = 30
-
     # Processing
     batch_size: int = Field(default=50, description="Max documents per batch")
     processing_timeout_seconds: int = Field(default=300, description="Max processing time per document")

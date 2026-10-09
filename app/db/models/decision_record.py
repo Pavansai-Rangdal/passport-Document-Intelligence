@@ -34,10 +34,6 @@ class DecisionRecord(Base):
     outcome: Mapped[DecisionOutcome] = mapped_column(SQLEnum(DecisionOutcome), nullable=False, index=True)
     confidence: Mapped[float] = mapped_column(nullable=False)
 
-    # System One recommendation
-    system_one_recommendation: Mapped[str | None] = mapped_column(String(50), nullable=True)
-    system_one_confidence: Mapped[float | None] = mapped_column(nullable=True)
-
     # Policy engine result
     policy_version: Mapped[str | None] = mapped_column(String(50), nullable=True)
     policy_rules_triggered: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)

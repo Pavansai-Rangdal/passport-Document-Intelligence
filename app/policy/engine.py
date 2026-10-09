@@ -16,19 +16,12 @@ class PolicyEngine:
         self.rules = PolicyRules()
         self.current_version = PolicyVersions.get_current()
 
-    def evaluate(
-        self,
-        validation_results: list[dict],
-        system_one_recommendation: str | None = None,
-        system_one_confidence: float | None = None,
-    ) -> dict[str, Any]:
+    def evaluate(self, validation_results: list[dict]) -> dict[str, Any]:
         """
         Evaluate policy and return decision.
 
         Args:
             validation_results: List of validation result dictionaries
-            system_one_recommendation: Optional recommendation from System One
-            system_one_confidence: Optional confidence score from System One
 
         Returns:
             dict: Decision outcome with reasoning
@@ -37,13 +30,10 @@ class PolicyEngine:
             "Evaluating policy",
             version=self.current_version.version,
             validation_count=len(validation_results),
-            system_one_available=system_one_recommendation is not None,
         )
 
         outcome, reasoning, triggered_rules = self.rules.evaluate(
             validation_results=validation_results,
-            system_one_recommendation=system_one_recommendation,
-            system_one_confidence=system_one_confidence,
         )
 
         result = {
@@ -51,8 +41,6 @@ class PolicyEngine:
             "policy_version": self.current_version.version,
             "reasoning": reasoning,
             "triggered_rules": triggered_rules,
-            "system_one_recommendation": system_one_recommendation,
-            "system_one_confidence": system_one_confidence,
         }
 
         logger.info(

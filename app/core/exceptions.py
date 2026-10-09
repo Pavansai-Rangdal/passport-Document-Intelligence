@@ -36,12 +36,6 @@ class MRZError(ExtractionError):
     pass
 
 
-class VerificationError(ApplicationError):
-    """Raised when verification fails."""
-
-    pass
-
-
 class SecurityError(ApplicationError):
     """Raised when security violations occur."""
 
