@@ -34,6 +34,11 @@ class Settings(BaseSettings):
     min_brightness: float = 50.0
     max_brightness: float = 200.0
 
+    # Laya (System One) ML model
+    laya_api_url: str = Field(default="", description="Laya model API base URL")
+    laya_api_key: str = Field(default="", description="Laya model API key")
+    laya_timeout_seconds: int = 30
+
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["json", "text"] = "json"
 
