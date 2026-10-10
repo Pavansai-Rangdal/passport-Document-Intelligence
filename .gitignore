@@ -64,5 +64,13 @@ htmlcov/
 # UV
 .uv/
 
+# Frontend
+frontend/node_modules/
+frontend/dist/
+
+# Claude Code internals
+.claude/
+.devin/
+
 # Local dev reference — not tracked
 COMMANDS.md
