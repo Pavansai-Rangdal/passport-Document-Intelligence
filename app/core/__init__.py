@@ -8,11 +8,8 @@ from app.core.exceptions import (
     FileIntakeError,
     MRZError,
     OCRError,
-    PolicyError,
     SecurityError,
-    StorageError,
     ValidationError,
-    VerificationError,
 )
 from app.core.logging import configure_logging, get_logger
 from app.core.security import get_security_manager
@@ -27,9 +24,6 @@ __all__ = [
     "ExtractionError",
     "OCRError",
     "MRZError",
-    "VerificationError",
-    "PolicyError",
-    "StorageError",
     "SecurityError",
     "FileIntakeError",
     "DatabaseError",

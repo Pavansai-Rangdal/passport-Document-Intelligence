@@ -4,7 +4,7 @@ import uuid
 from enum import Enum
 from typing import TYPE_CHECKING
 
-from sqlalchemy import JSON, String, Text
+from sqlalchemy import JSON, ForeignKey, String, Text
 from sqlalchemy import Enum as SQLEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -28,8 +28,8 @@ class DecisionRecord(Base):
     __tablename__ = "decision_records"
 
     id: Mapped[uuid.UUID] = mapped_column(primary_key=True, default=uuid.uuid4)
-    batch_id: Mapped[uuid.UUID] = mapped_column(String(36), nullable=False, index=True)
-    document_id: Mapped[uuid.UUID] = mapped_column(String(36), nullable=False, index=True)
+    batch_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("batches.id"), nullable=False, index=True)
+    document_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("documents.id"), nullable=False, index=True)
 
     outcome: Mapped[DecisionOutcome] = mapped_column(SQLEnum(DecisionOutcome), nullable=False, index=True)
     confidence: Mapped[float] = mapped_column(nullable=False)
