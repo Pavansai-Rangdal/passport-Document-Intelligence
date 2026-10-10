@@ -34,10 +34,10 @@ class Settings(BaseSettings):
     min_brightness: float = 50.0
     max_brightness: float = 200.0
 
-    # Laya (System One) ML model
-    laya_api_url: str = Field(default="", description="Laya model API base URL")
-    laya_api_key: str = Field(default="", description="Laya model API key")
-    laya_timeout_seconds: int = 30
+    # Laya (System One) local ML model
+    laya_checkpoint_path: str = Field(
+        default="", description="Path to the Laya model checkpoint directory"
+    )
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_format: Literal["json", "text"] = "json"

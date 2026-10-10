@@ -1,5 +1,5 @@
-"""Laya (System One) ML model integration."""
+"""Laya (System One) local ML model integration."""
 
-from app.laya.client import LayaClient
+from app.laya.client import LayaClassifier
 
-__all__ = ["LayaClient"]
+__all__ = ["LayaClassifier"]

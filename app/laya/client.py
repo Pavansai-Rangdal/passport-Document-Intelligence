@@ -1,74 +1,110 @@
-"""Laya (System One) ML model client for passport expiry classification."""
+"""Laya System 1 decision engine integration for passport expiry classification.
 
+Laya is a local fast non-autoregressive decision model. It accepts a text
+"state" (context) and a set of structured questions, then returns calibrated
+probability answers.
+
+Usage:
+    classifier = LayaClassifier(checkpoint_path)
+    result = classifier.classify(extraction_result)
+    # result = {"expired": True/False/None, "confidence": 0.92}
+"""
+
+from datetime import date
 from pathlib import Path
 from typing import Any
-
-import httpx
 
 from app.core.logging import get_logger
 
 logger = get_logger(__name__)
 
 
-class LayaClient:
-    """HTTP client for the Laya (System One) passport classification model.
+class LayaClassifier:
+    """Passport expiry classifier using the Laya System 1 decision engine."""
 
-    The model accepts a passport image and returns a classification:
-    expired / valid / unknown, along with a confidence score.
+    def __init__(self, checkpoint_path: str) -> None:
+        import laya
 
-    Expected response JSON:
-    {
-        "expired": true | false | null,
-        "expiry_date": "YYYY-MM-DD" | null,
-        "confidence": 0.0 - 1.0,
-        "model_version": "..."
-    }
-    """
+        logger.info("Loading Laya model checkpoint", checkpoint=checkpoint_path)
+        self._agent = laya.load(checkpoint_path)
+        logger.info("Laya model loaded")
 
-    def __init__(self, api_url: str, api_key: str, timeout: int = 30) -> None:
-        self._api_url = api_url.rstrip("/")
-        self._api_key = api_key
-        self._timeout = timeout
+    def classify(self, extraction_result: dict[str, Any]) -> dict[str, Any]:
+        """Classify whether the passport is expired using Laya.
 
-    def classify(self, image_path: Path) -> dict[str, Any]:
-        """Send image to Laya model and return classification result.
+        Builds a text context from the extracted passport data and asks
+        Laya: "Is this passport expired as of today?"
 
-        Returns a dict with keys:
-            expired (bool | None), expiry_date (str | None),
-            confidence (float), model_version (str)
+        Args:
+            extraction_result: Dict returned by ExtractionService.extract_from_image()
 
-        Raises:
-            httpx.HTTPError: on network or HTTP-level errors.
+        Returns:
+            {"expired": bool | None, "confidence": float}
         """
-        logger.info("Sending image to Laya model", path=str(image_path))
+        import laya
 
-        with open(image_path, "rb") as f:
-            image_bytes = f.read()
+        state = _build_state(extraction_result)
+        logger.info("Sending state to Laya model", state_length=len(state))
 
-        suffix = image_path.suffix.lower()
-        mime = {
-            ".jpg": "image/jpeg",
-            ".jpeg": "image/jpeg",
-            ".png": "image/png",
-            ".webp": "image/webp",
-            ".pdf": "application/pdf",
-        }.get(suffix, "application/octet-stream")
+        questions = {
+            "expired": {
+                "type": "noul",
+                "instructions": (
+                    "Based on the passport data above and today's date, "
+                    "is the passport expired?"
+                ),
+            }
+        }
 
-        with httpx.Client(timeout=self._timeout) as client:
-            response = client.post(
-                f"{self._api_url}/classify",
-                headers={
-                    "Authorization": f"Bearer {self._api_key}",
-                    "Accept": "application/json",
-                },
-                files={"file": (image_path.name, image_bytes, mime)},
-            )
-            response.raise_for_status()
+        result = laya.decide(self._agent, state, questions=questions, return_details=True)
 
-        result = response.json()
-        logger.info(
-            "Laya model responded",
-            expired=result.get("expired"),
-            confidence=result.get("confidence"),
-        )
-        return result
+        expired_answer = result.answers.get("expired") or {}
+        # noul type: probability that the answer is True
+        noul_prob = float(expired_answer.get("noul", 0.5))
+        expired = noul_prob >= 0.5
+        confidence = result.answer_confidence.get("expired") or abs(noul_prob - 0.5) * 2
+
+        logger.info("Laya classified passport", expired=expired, confidence=confidence)
+        return {"expired": expired, "confidence": float(confidence)}
+
+
+def _build_state(extraction_result: dict[str, Any]) -> str:
+    """Format extracted passport data as a text context for Laya."""
+    lines = [f"Today's date: {date.today().isoformat()}"]
+
+    mrz_data = extraction_result.get("mrz_data") or {}
+
+    expiry = mrz_data.get("expiry_date_normalized") or mrz_data.get("expiry_date")
+    if expiry:
+        lines.append(f"Passport expiry date: {expiry}")
+
+    birth = mrz_data.get("birth_date_normalized") or mrz_data.get("birth_date")
+    if birth:
+        lines.append(f"Date of birth: {birth}")
+
+    doc_num = mrz_data.get("document_number")
+    if doc_num:
+        lines.append(f"Document number: {doc_num}")
+
+    nationality = mrz_data.get("nationality")
+    if nationality:
+        lines.append(f"Nationality: {nationality}")
+
+    issuer = mrz_data.get("issuing_state")
+    if issuer:
+        lines.append(f"Issuing state: {issuer}")
+
+    mrz_type = mrz_data.get("mrz_type")
+    if mrz_type:
+        lines.append(f"MRZ type: {mrz_type}")
+
+    if not mrz_data:
+        lines.append("MRZ data: not detected")
+
+    ocr_fields = extraction_result.get("ocr_fields") or {}
+    if ocr_fields:
+        lines.append("Additional OCR fields: " + ", ".join(
+            f"{k}={v}" for k, v in ocr_fields.items() if v
+        ))
+
+    return "\n".join(lines)

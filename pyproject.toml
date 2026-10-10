@@ -26,7 +26,7 @@ dependencies = [
     "tenacity>=9.0,<10.0",
     "structlog>=25.1,<26.0",
     "orjson>=3.10,<4.0",
-
+    "laya>=0.3.20",
 ]
 
 [project.optional-dependencies]
