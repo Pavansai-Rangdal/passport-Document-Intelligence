@@ -98,7 +98,7 @@ app/
 
 7. **Start the application**:
    ```bash
-   uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+   uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8888
    ```
 
 ### Docker Deployment
@@ -115,8 +115,8 @@ app/
 
 3. **Access the API**:
    ```
-   http://localhost:8000
-   http://localhost:8000/docs (Swagger UI)
+   http://localhost:8888
+   http://localhost:8888/docs (Swagger UI)
    ```
 
 ## Configuration

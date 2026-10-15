@@ -50,6 +50,7 @@ logs/
 # Data
 data/uploads/*
 !data/uploads/.gitkeep
+sample-passports/
 
 # OS
 .DS_Store

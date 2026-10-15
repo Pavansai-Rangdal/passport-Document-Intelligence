@@ -3,7 +3,7 @@
 from app.extraction.extraction_service import ExtractionService
 from app.extraction.mrz import MRZCheckDigitValidator, MRZData, MRZParser
 from app.extraction.normalization import DateNormalizer, FieldNormalizer
-from app.extraction.ocr import FieldExtractor, PaddleOCREngine, TesseractOCREngine
+from app.extraction.ocr import EasyOCREngine, FieldExtractor, PaddleOCREngine
 
 __all__ = [
     "ExtractionService",
@@ -12,7 +12,7 @@ __all__ = [
     "MRZCheckDigitValidator",
     "DateNormalizer",
     "FieldNormalizer",
-    "TesseractOCREngine",
     "PaddleOCREngine",
+    "EasyOCREngine",
     "FieldExtractor",
 ]

@@ -38,8 +38,9 @@ async def classify_passport(file: UploadFile = File(...)):
 
     try:
         extraction = _extraction_service.extract_from_image(tmp_path)
-    except ExtractionError as e:
-        raise HTTPException(status_code=422, detail=str(e))
+    except ExtractionError:
+        # OCR couldn't extract text — return unknown result rather than error
+        extraction = {"mrz_detected": False, "mrz_data": None}
     except Exception as e:
         logger.error("Extraction failed unexpectedly", error=str(e))
         raise HTTPException(status_code=500, detail="Extraction failed")

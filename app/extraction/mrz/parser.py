@@ -195,18 +195,40 @@ class MRZParser:
             mrz_type="TD2",
         )
 
+    # Common OCR misreadings of digits in MRZ zones
+    _OCR_DIGIT_MAP = str.maketrans({
+        "O": "0", "Q": "0",
+        "I": "1", "L": "1",
+        "Z": "2",
+        "E": "3",
+        "A": "4",
+        "S": "5",
+        "G": "6",
+        "B": "8", "R": "8",
+        "T": "7",
+    })
+
+    @staticmethod
+    def _fix_digit_field(s: str) -> str:
+        """Replace common OCR letter-for-digit misreadings in a digit-only field."""
+        return s.translate(MRZParser._OCR_DIGIT_MAP)
+
     @staticmethod
     def _format_date(date_str: str) -> str:
         """Format MRZ date (YYMMDD) to ISO format (YYYY-MM-DD)."""
         if len(date_str) != 6:
             return date_str
 
-        year = int(date_str[0:2])
-        month = date_str[2:4]
-        day = date_str[4:6]
+        # Correct common OCR misreadings before int conversion
+        corrected = MRZParser._fix_digit_field(date_str)
+        if not corrected.isdigit():
+            logger.warning("Date field contains non-digits after correction", raw=date_str, corrected=corrected)
+            return date_str  # Return raw; caller will treat as unknown
 
-        # Determine century (assuming valid passports are not from 1900-1999 if year > 50)
-        # This is a simplified heuristic
+        year = int(corrected[0:2])
+        month = corrected[2:4]
+        day = corrected[4:6]
+
         full_year = 2000 + year if year < 50 else 1900 + year
 
         return f"{full_year:04d}-{month}-{day}"

@@ -26,23 +26,15 @@ dependencies = [
     "tenacity>=9.0,<10.0",
     "structlog>=25.1,<26.0",
     "orjson>=3.10,<4.0",
-
-]
-
-[project.optional-dependencies]
-ocr-paddle = [
+    "easyocr>=1.7.2",
     "paddleocr>=3.0,<4.0",
     "paddlepaddle>=3.0,<4.0",
-]
-ocr-tesseract = [
-    "pytesseract>=0.3.13,<1.0",
 ]
 
 [dependency-groups]
 dev = [
     "ruff>=0.9,<1.0",
     "mypy>=1.14,<2.0",
-    "pytesseract>=0.3.13,<1.0",
     "pytest>=8.0,<9.0",
     "pytest-asyncio>=0.24,<1.0",
 ]

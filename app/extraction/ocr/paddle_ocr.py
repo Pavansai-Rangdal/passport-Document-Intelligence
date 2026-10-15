@@ -36,10 +36,7 @@ class PaddleOCREngine(BaseOCREngine):
             return self._available
 
         try:
-            from paddleocr import PaddleOCR  # type: ignore
-
-            # Try to create a minimal instance to verify
-            _ = PaddleOCR(use_angle_cls=True, lang="en")
+            import paddleocr  # type: ignore  # noqa: F401
             self._available = True
             logger.info("PaddleOCR is available")
             return True

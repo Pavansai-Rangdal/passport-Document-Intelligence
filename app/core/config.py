@@ -20,11 +20,8 @@ class Settings(BaseSettings):
     debug: bool = False
     environment: Literal["development", "staging", "production"] = "development"
 
-    host: str = "0.0.0.0"
-    port: int = 8000
-
     # OCR
-    ocr_engine: Literal["paddle", "tesseract", "both"] = "both"
+    ocr_engine: Literal["paddle", "easyocr"] = "paddle"
     ocr_confidence_threshold: float = Field(default=0.7)
 
     # Image quality thresholds
