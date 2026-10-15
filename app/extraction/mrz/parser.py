@@ -59,8 +59,8 @@ class MRZParser:
             raise MRZError("TD3 lines must be 44 characters each")
 
         # Parse line 1: P<USA<SURNAME<<GIVEN<NAMES<<<<<<<<<<<<<<<<<<<
-        document_type = line1[0]
-        issuing_state = line1[2:5]
+        document_type = line1[0:2].rstrip("<")
+        issuing_state = line1[2:5].rstrip("<")
 
         # Parse name
         name_parts = line1[5:].split("<<")
@@ -69,7 +69,7 @@ class MRZParser:
 
         # Parse line 2: A12345678<USA8001018M2501019<<<<<<<<<<<<<<04
         document_number = line2[0:9].replace("<", "")
-        nationality = line2[10:13]
+        nationality = line2[10:13].rstrip("<")
         birth_date_str = line2[13:19]
         sex = line2[20]
         expiry_date_str = line2[21:27]
@@ -97,7 +97,15 @@ class MRZParser:
 
     @staticmethod
     def parse_td1(lines: list[str]) -> MRZData:
-        """Parse TD1 (ID card) MRZ format (3 lines, 30 chars each)."""
+        """Parse TD1 (ID card) MRZ format (3 lines, 30 chars each).
+
+        ICAO Doc 9303 Part 5 field layout:
+          Line 1: [0] doc type  [1] subtype  [2-4] issuing state  [5-13] doc number
+                  [14] check    [15-29] optional data
+          Line 2: [0-5] birth date  [6] check  [7] sex  [8-13] expiry date
+                  [14] check  [15-17] nationality  [18-28] optional  [29] composite check
+          Line 3: [0-29] name (surname<<given names)
+        """
         if len(lines) != 3:
             raise MRZError(f"TD1 requires 3 lines, got {len(lines)}")
 
@@ -108,26 +116,19 @@ class MRZParser:
         if len(line1) != 30 or len(line2) != 30 or len(line3) != 30:
             raise MRZError("TD1 lines must be 30 characters each")
 
-        # Parse line 1: I<UTO<ERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<<<
-        document_type = line1[0]
-        issuing_state = line1[2:5]
+        document_type = line1[0:2].rstrip("<")
+        issuing_state = line1[2:5].rstrip("<")
+        document_number = line1[5:14].replace("<", "")
 
-        # Parse name
-        name_parts = line1[5:].split("<<")
+        birth_date_str = line2[0:6]
+        sex = line2[7]
+        expiry_date_str = line2[8:14]
+        nationality = line2[15:18].rstrip("<")
+
+        name_parts = line3.split("<<")
         surname = name_parts[0].replace("<", " ").strip()
         given_names = name_parts[1].replace("<", " ").strip() if len(name_parts) > 1 else ""
 
-        # Parse line 2: A12345678<UTO8001018F2501019<<<<<<<<<<<<<
-        document_number = line2[0:9].replace("<", "")
-        nationality = line2[10:13]
-        birth_date_str = line2[13:19]
-        sex = line2[20]
-        expiry_date_str = line2[21:27]
-
-        # Parse line 3 for optional personal number
-        personal_number = line3[0:15].replace("<", "")
-
-        # Format dates
         birth_date = MRZParser._format_date(birth_date_str)
         expiry_date = MRZParser._format_date(expiry_date_str)
 
@@ -143,7 +144,6 @@ class MRZParser:
             surname=surname,
             given_names=given_names,
             nationality=nationality,
-            personal_number=personal_number,
             mrz_type="TD1",
         )
 
@@ -160,8 +160,8 @@ class MRZParser:
             raise MRZError("TD2 lines must be 36 characters each")
 
         # Parse line 1: I<UTOERIKSSON<<ANNA<MARIA<<<<<<<<<<<<<<<<<
-        document_type = line1[0]
-        issuing_state = line1[2:5]
+        document_type = line1[0:2].rstrip("<")
+        issuing_state = line1[2:5].rstrip("<")
 
         # Parse name (combined in TD2)
         name_field = line1[5:]
@@ -171,7 +171,7 @@ class MRZParser:
 
         # Parse line 2: A123456785UTO8001018F2501019<<<<<<<<<<<<<
         document_number = line2[0:9].replace("<", "")
-        nationality = line2[10:13]
+        nationality = line2[10:13].rstrip("<")
         birth_date_str = line2[13:19]
         sex = line2[20]
         expiry_date_str = line2[21:27]

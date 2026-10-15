@@ -18,12 +18,19 @@ class PaddleOCREngine(BaseOCREngine):
         self._available: bool | None = None
 
     def _get_ocr(self) -> Any:
-        """Lazy load PaddleOCR."""
+        """Lazy load PaddleOCR (v3 API: no use_angle_cls, uses predict())."""
         if self._ocr is None:
             try:
                 from paddleocr import PaddleOCR  # type: ignore
 
-                self._ocr = PaddleOCR(use_angle_cls=True, lang="en")
+                # Disable doc unwarping (UVDoc) and orientation classifiers —
+                # they crash on some oneDNN builds and aren't needed for flat passport scans.
+                self._ocr = PaddleOCR(
+                    lang="en",
+                    use_doc_unwarping=False,
+                    use_doc_orientation_classify=False,
+                    use_textline_orientation=False,
+                )
                 logger.info("PaddleOCR initialized")
             except Exception as e:
                 logger.error("Failed to initialize PaddleOCR", error=str(e))
@@ -50,27 +57,62 @@ class PaddleOCREngine(BaseOCREngine):
         return "paddle"
 
     def extract_text(self, image_path: Path) -> str:
-        """Extract all text from an image."""
+        """Extract all text from an image.
+
+        Crops the bottom 25% (MRZ zone) and OCRs it first, then the full page.
+        Returns mrz_crop_text + '\\x00' + full_page_text so field_extractor can
+        scope its stream scan to the MRZ zone and avoid false positives.
+        """
         if not self.is_available():
             raise OCRError("PaddleOCR is not available")
 
         try:
+            import tempfile
+            from PIL import Image
+
             ocr = self._get_ocr()
-            result = ocr.ocr(str(image_path), cls=True)
 
-            if not result or not result[0]:
-                logger.warning("No text detected by PaddleOCR")
-                return ""
+            def _ocr_lines(path: str) -> list[str]:
+                """Extract text lines using PaddleOCR v3 predict() API."""
+                result = ocr.predict(path)
+                lines: list[str] = []
+                for page in result:
+                    if page is None:
+                        continue
+                    # v3 result object exposes rec_texts directly
+                    if hasattr(page, "rec_texts"):
+                        lines.extend(t for t in page.rec_texts if t)
+                    else:
+                        # fallback: v2-style nested list [(bbox, (text, score)), ...]
+                        for item in page:
+                            if item and len(item) >= 2:
+                                text_info = item[1]
+                                if isinstance(text_info, (list, tuple)) and text_info:
+                                    lines.append(text_info[0])
+                return lines
 
-            # Extract text from results
-            text_lines = []
-            for line in result[0]:
-                if line and len(line) >= 2:
-                    text_lines.append(line[1][0])
+            # --- MRZ zone: bottom 25% via a proper temp file ---
+            img = Image.open(image_path)
+            w, h = img.size
+            mrz_crop = img.crop((0, int(h * 0.72), w, h))
+            mrz_text = ""
+            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+                mrz_crop.save(tmp.name)
+                tmp_path = tmp.name
+            try:
+                mrz_text = "\n".join(_ocr_lines(tmp_path))
+            finally:
+                import os; os.unlink(tmp_path)
 
-            text = "\n".join(text_lines)
-            logger.info("Text extracted with PaddleOCR", length=len(text))
-            return text
+            # --- Full page ---
+            full_text = "\n".join(_ocr_lines(str(image_path)))
+
+            # \x00 separates MRZ-crop text from full-page text
+            combined = mrz_text + "\x00" + full_text
+            logger.info("Text extracted with PaddleOCR", mrz_chars=len(mrz_text), full_chars=len(full_text))
+            logger.debug("PaddleOCR MRZ crop lines", lines=mrz_text[:300])
+            logger.debug("PaddleOCR full page lines", lines=full_text[:300])
+            return combined
         except Exception as e:
             logger.error("PaddleOCR text extraction failed", error=str(e))
             raise OCRError(f"PaddleOCR extraction failed: {e}") from e
@@ -82,41 +124,46 @@ class PaddleOCREngine(BaseOCREngine):
 
         try:
             ocr = self._get_ocr()
-            result = ocr.ocr(str(image_path), cls=True)
+            result = ocr.predict(str(image_path))
 
-            if not result or not result[0]:
-                logger.warning("No text detected by PaddleOCR")
-                return []
-
-            # Extract text with confidence
             results = []
-            for line in result[0]:
-                if line and len(line) >= 2:
-                    bbox = line[0]
-                    text_info = line[1]
-                    text = text_info[0]
-                    confidence = text_info[1] if len(text_info) > 1 else 0.0
-
-                    # Convert bbox to simple format
-                    if isinstance(bbox, list) and len(bbox) == 4:
-                        x_coords = [point[0] for point in bbox]
-                        y_coords = [point[1] for point in bbox]
-                        bbox_dict = {
-                            "x": int(min(x_coords)),
-                            "y": int(min(y_coords)),
-                            "width": int(max(x_coords) - min(x_coords)),
-                            "height": int(max(y_coords) - min(y_coords)),
-                        }
-                    else:
-                        bbox_dict = {"x": 0, "y": 0, "width": 0, "height": 0}
-
-                    results.append(
-                        {
-                            "text": text,
-                            "confidence": float(confidence),
-                            "bbox": bbox_dict,
-                        }
-                    )
+            for page in result:
+                if page is None:
+                    continue
+                if hasattr(page, "rec_texts"):
+                    boxes = getattr(page, "dt_boxes", [None] * len(page.rec_texts))
+                    scores = getattr(page, "rec_scores", [1.0] * len(page.rec_texts))
+                    for text, score, bbox in zip(page.rec_texts, scores, boxes):
+                        if not text:
+                            continue
+                        if bbox is not None and len(bbox) == 4:
+                            x_coords = [p[0] for p in bbox]
+                            y_coords = [p[1] for p in bbox]
+                            bbox_dict = {
+                                "x": int(min(x_coords)), "y": int(min(y_coords)),
+                                "width": int(max(x_coords) - min(x_coords)),
+                                "height": int(max(y_coords) - min(y_coords)),
+                            }
+                        else:
+                            bbox_dict = {"x": 0, "y": 0, "width": 0, "height": 0}
+                        results.append({"text": text, "confidence": float(score), "bbox": bbox_dict})
+                else:
+                    for item in page:
+                        if item and len(item) >= 2:
+                            bbox, text_info = item[0], item[1]
+                            text = text_info[0] if text_info else ""
+                            confidence = text_info[1] if len(text_info) > 1 else 0.0
+                            if bbox and len(bbox) == 4:
+                                x_coords = [p[0] for p in bbox]
+                                y_coords = [p[1] for p in bbox]
+                                bbox_dict = {
+                                    "x": int(min(x_coords)), "y": int(min(y_coords)),
+                                    "width": int(max(x_coords) - min(x_coords)),
+                                    "height": int(max(y_coords) - min(y_coords)),
+                                }
+                            else:
+                                bbox_dict = {"x": 0, "y": 0, "width": 0, "height": 0}
+                            results.append({"text": text, "confidence": float(confidence), "bbox": bbox_dict})
 
             logger.info("Text extracted with confidence", count=len(results))
             return results

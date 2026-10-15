@@ -58,7 +58,12 @@ async def classify_passport(file: UploadFile = File(...)):
         except ValueError:
             pass
 
-    confidence = 0.9 if mrz_detected else 0.3
+    if expired is not None:
+        confidence = 0.92      # MRZ parsed + valid expiry date extracted
+    elif mrz_detected:
+        confidence = 0.50      # MRZ found but expiry date unreadable
+    else:
+        confidence = 0.20      # No MRZ detected
 
     if expired is None:
         message = "Could not determine expiry — MRZ not detected or expiry date unreadable"

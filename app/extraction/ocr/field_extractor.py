@@ -43,6 +43,7 @@ class FieldExtractor:
     @staticmethod
     def extract_fields(text: str) -> dict[str, Any]:
         """Extract passport fields from OCR text."""
+        text = text.replace("\x00", "\n")
         extracted = {}
 
         for field_name, pattern in FieldExtractor.PATTERNS.items():
@@ -67,12 +68,17 @@ class FieldExtractor:
         valid = re.compile(r'^[A-Z0-9<]+$')
         lengths = {30, 36, 44}
 
-        # Pass 1: per-line exact match — collect all candidate lines, then validate pairs
+        # Split into MRZ-zone section (before \x00 sentinel) and full-page section.
+        # OCR engines put the MRZ-crop text first so the stream scan stays focused.
+        mrz_section, _, full_section = text.partition("\x00")
+
+        # Pass 1: prefer MRZ-zone lines; fall back to full-page lines if needed
         candidates: list[str] = []
-        for line in text.split("\n"):
-            cleaned = re.sub(r'\s+', '', line.strip().upper())
-            if len(cleaned) in lengths and valid.match(cleaned):
-                candidates.append(cleaned)
+        for scan_text in ([mrz_section, full_section] if full_section else [mrz_section]):
+            for line in scan_text.split("\n"):
+                cleaned = re.sub(r'\s+', '', line.strip().upper())
+                if len(cleaned) in lengths and valid.match(cleaned):
+                    candidates.append(cleaned)
 
         # Validate TD3 pairs: line2 must have a sex char at pos 20 and a plausible expiry date
         td3 = [l for l in candidates if len(l) == 44]
@@ -82,37 +88,57 @@ class FieldExtractor:
                 logger.info("MRZ lines extracted", count=2)
                 return [td3[i], td3[i + 1]]
 
-        # Validate TD1 triples (3 × 30 chars)
+        # Validate TD1 triples (3 × 30 chars) per ICAO Doc 9303 Part 5:
+        # line2 sex char at position 7, expiry date at positions 8-13.
         td1 = [l for l in candidates if len(l) == 30]
-        if len(td1) >= 3:
-            logger.info("MRZ lines extracted", count=3)
-            return td1[:3]
+        for i in range(len(td1) - 2):
+            line2 = td1[i + 1]
+            if line2[7] in "MFX<" and _mrz_date_plausible(line2[8:14]):
+                logger.info("MRZ lines extracted", count=3)
+                return [td1[i], td1[i + 1], td1[i + 2]]
 
-        # Pass 2: collapse all MRZ-valid chars into a stream and search for the pattern
-        stream = re.sub(r'[^A-Z0-9<]', '', text.upper())
+        # Validate TD2 pairs (2 × 36 chars) per ICAO Doc 9303 Part 6:
+        # line2 sex char at position 20, expiry date at positions 21-26.
+        td2 = [l for l in candidates if len(l) == 36]
+        for i in range(len(td2) - 1):
+            line2 = td2[i + 1]
+            if line2[20] in "MFX<" and _mrz_date_plausible(line2[21:27]):
+                logger.info("MRZ lines extracted", count=2)
+                return [td2[i], td2[i + 1]]
 
-        # TD3: two lines of 44.
-        # Line 1: doc-type letter (P for passport) + filler/issuing-state-char + 3-letter state + 39 chars
-        # Line 2: 20 chars + sex [MFX<] at position 20 + 23 chars
-        # The sex-field constraint eliminates virtually all false positives from ordinary page text.
-        for td3_pat in [
-            # Strict: passport (P) with explicit sex char
-            r'(P[<A-Z][A-Z]{3}[A-Z0-9<]{39})([A-Z0-9<]{20}[MFX<][A-Z0-9<]{23})',
-            # Relaxed: any doc type, still require sex char
-            r'([A-Z][<A-Z][A-Z]{3}[A-Z0-9<]{39})([A-Z0-9<]{20}[MFX<][A-Z0-9<]{23})',
-        ]:
-            m = re.search(td3_pat, stream)
-            if m and _mrz_date_plausible(m.group(2)[21:27]):
-                mrz_lines = [m.group(1), m.group(2)]
-                logger.info("MRZ lines extracted (stream scan)", count=len(mrz_lines))
+        # Pass 2: stream scan — try MRZ-zone section first to avoid false positives,
+        # then fall back to full text if nothing found.
+        scan_sections = [mrz_section, mrz_section + full_section] if full_section else [mrz_section]
+
+        for scan_text in scan_sections:
+            stream = re.sub(r'[^A-Z0-9<]', '', scan_text.upper())
+
+            # TD3 — strict (P prefix) then relaxed (any doc type), both require sex char.
+            # Issuing state uses [A-Z<]{3} because some countries (e.g. Germany "D<<")
+            # pad their single-letter code with < fillers.
+            for td3_pat in [
+                r'(P[<A-Z][A-Z<]{3}[A-Z0-9<]{39})([A-Z0-9<]{20}[MFX<][A-Z0-9<]{23})',
+                r'([A-Z][<A-Z][A-Z<]{3}[A-Z0-9<]{39})([A-Z0-9<]{20}[MFX<][A-Z0-9<]{23})',
+            ]:
+                m = re.search(td3_pat, stream)
+                if m and _mrz_date_plausible(m.group(2)[21:27]):
+                    mrz_lines = [m.group(1), m.group(2)]
+                    logger.info("MRZ lines extracted (stream scan)", count=len(mrz_lines))
+                    return mrz_lines
+
+            # TD2 — two lines of 36, sex char at position 20 of line 2
+            m2 = re.search(r'([A-Z0-9<]{36})([A-Z0-9<]{20}[MFX<][A-Z0-9<]{15})', stream)
+            if m2 and _mrz_date_plausible(m2.group(2)[21:27]):
+                mrz_lines = [m2.group(1), m2.group(2)]
+                logger.info("MRZ lines extracted (stream scan TD2)", count=len(mrz_lines))
                 return mrz_lines
 
-        # TD1: three lines of 30 — line 2 has sex at position 14
-        m1 = re.search(r'([A-Z0-9<]{30})([A-Z0-9<]{14}[MFX<][A-Z0-9<]{15})([A-Z0-9<]{30})', stream)
-        if m1:
-            mrz_lines = [m1.group(1), m1.group(2), m1.group(3)]
-            logger.info("MRZ lines extracted (stream scan TD1)", count=len(mrz_lines))
-            return mrz_lines
+            # TD1 — three lines of 30, sex char at position 7 of line 2 per ICAO Doc 9303 Part 5
+            m1 = re.search(r'([A-Z0-9<]{30})([A-Z0-9<]{7}[MFX<][A-Z0-9<]{22})([A-Z0-9<]{30})', stream)
+            if m1 and _mrz_date_plausible(m1.group(2)[8:14]):
+                mrz_lines = [m1.group(1), m1.group(2), m1.group(3)]
+                logger.info("MRZ lines extracted (stream scan TD1)", count=len(mrz_lines))
+                return mrz_lines
 
         logger.info("MRZ lines extracted", count=0)
         return []

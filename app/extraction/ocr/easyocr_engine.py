@@ -40,16 +40,41 @@ class EasyOCREngine(BaseOCREngine):
         return "easyocr"
 
     def extract_text(self, image_path: Path) -> str:
-        """Extract text from image using EasyOCR."""
+        """Extract text from image using EasyOCR.
+
+        Crops the bottom 28% (MRZ zone) separately and uses an MRZ-char allowlist
+        on that crop to reduce misreadings. Returns mrz_crop_text + '\\x00' + full_text
+        so field_extractor can scope its stream scan to the MRZ zone.
+        """
         if not self.is_available():
             raise OCRError("EasyOCR is not available")
 
         try:
+            import numpy as np
+            from PIL import Image
+
             reader = self._get_reader()
-            results = reader.readtext(str(image_path), detail=0, paragraph=False)
-            text = "\n".join(str(r) for r in results)
-            logger.info("Text extracted with EasyOCR", length=len(text))
-            return text
+            MRZ_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
+
+            img = Image.open(image_path)
+            w, h = img.size
+            mrz_pil = img.crop((0, int(h * 0.72), w, h))
+            mrz_arr = np.array(mrz_pil)
+
+            mrz_results = reader.readtext(
+                mrz_arr,
+                detail=0,
+                paragraph=False,
+                allowlist=MRZ_CHARS,
+                width_ths=0.3,
+            )
+            mrz_text = "\n".join(str(r) for r in mrz_results)
+
+            full_results = reader.readtext(str(image_path), detail=0, paragraph=False)
+            full_text = "\n".join(str(r) for r in full_results)
+
+            logger.info("Text extracted with EasyOCR", length=len(full_text))
+            return mrz_text + "\x00" + full_text
         except Exception as e:
             logger.error("EasyOCR extraction failed", error=str(e))
             raise OCRError(f"EasyOCR extraction failed: {e}") from e
