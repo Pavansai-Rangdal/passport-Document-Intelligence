@@ -10,6 +10,13 @@ from app.extraction.ocr.base import BaseOCREngine
 logger = get_logger(__name__)
 
 
+def _page_field(page: Any, name: str, default: Any = None) -> Any:
+    """Read a field from a PaddleOCR v3 result (dict-like OCRResult, or attribute-style)."""
+    if isinstance(page, dict):
+        return page.get(name, default)
+    return getattr(page, name, default)
+
+
 class PaddleOCREngine(BaseOCREngine):
     """PaddleOCR engine implementation."""
 
@@ -30,6 +37,8 @@ class PaddleOCREngine(BaseOCREngine):
                     use_doc_unwarping=False,
                     use_doc_orientation_classify=False,
                     use_textline_orientation=False,
+                    # oneDNN in paddlepaddle 3.3.x CPU raises ConvertPirAttribute2RuntimeAttribute
+                    enable_mkldnn=False,
                 )
                 logger.info("PaddleOCR initialized")
             except Exception as e:
@@ -59,7 +68,7 @@ class PaddleOCREngine(BaseOCREngine):
     def extract_text(self, image_path: Path) -> str:
         """Extract all text from an image.
 
-        Crops the bottom 25% (MRZ zone) and OCRs it first, then the full page.
+        Crops the bottom 28% (MRZ zone) and OCRs it first, then the full page.
         Returns mrz_crop_text + '\\x00' + full_page_text so field_extractor can
         scope its stream scan to the MRZ zone and avoid false positives.
         """
@@ -80,8 +89,9 @@ class PaddleOCREngine(BaseOCREngine):
                     if page is None:
                         continue
                     # v3 result object exposes rec_texts directly
-                    if hasattr(page, "rec_texts"):
-                        lines.extend(t for t in page.rec_texts if t)
+                    rec_texts = _page_field(page, "rec_texts")
+                    if rec_texts is not None:
+                        lines.extend(t for t in rec_texts if t)
                     else:
                         # fallback: v2-style nested list [(bbox, (text, score)), ...]
                         for item in page:
@@ -91,10 +101,10 @@ class PaddleOCREngine(BaseOCREngine):
                                     lines.append(text_info[0])
                 return lines
 
-            # --- MRZ zone: bottom 25% via a proper temp file ---
+            # --- MRZ zone: bottom 28% via a proper temp file ---
             img = Image.open(image_path)
             w, h = img.size
-            mrz_crop = img.crop((0, int(h * 0.72), w, h))
+            mrz_crop = img.crop((0, int(h * 0.72), w, h)).convert("RGB")
             mrz_text = ""
             with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
                 mrz_crop.save(tmp.name)
@@ -130,10 +140,13 @@ class PaddleOCREngine(BaseOCREngine):
             for page in result:
                 if page is None:
                     continue
-                if hasattr(page, "rec_texts"):
-                    boxes = getattr(page, "dt_boxes", [None] * len(page.rec_texts))
-                    scores = getattr(page, "rec_scores", [1.0] * len(page.rec_texts))
-                    for text, score, bbox in zip(page.rec_texts, scores, boxes):
+                rec_texts = _page_field(page, "rec_texts")
+                if rec_texts is not None:
+                    boxes = _page_field(page, "dt_polys", None)
+                    if boxes is None:
+                        boxes = _page_field(page, "dt_boxes", [None] * len(rec_texts))
+                    scores = _page_field(page, "rec_scores", [1.0] * len(rec_texts))
+                    for text, score, bbox in zip(rec_texts, scores, boxes):
                         if not text:
                             continue
                         if bbox is not None and len(bbox) == 4:
