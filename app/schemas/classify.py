@@ -12,3 +12,4 @@ class ClassificationResponse(BaseModel):
     mrz_detected: bool
     method: str
     message: str
+    filename: Optional[str] = None

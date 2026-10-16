@@ -50,6 +50,7 @@ logs/
 # Data
 data/uploads/*
 !data/uploads/.gitkeep
+sample-passports/
 
 # OS
 .DS_Store
@@ -72,5 +73,10 @@ frontend/dist/
 .claude/
 .devin/
 
-# Local dev reference — not tracked
+# Local-only files
 COMMANDS.md
+MRZ_patterns_inside_passport.jpg
+
+# Tool caches
+.ruff_cache/
+.mypy_cache/

@@ -10,7 +10,7 @@ from app.document_processing.detection import MRZDetector
 from app.document_processing.preprocessing import QualityAssessor
 from app.extraction.mrz import MRZParser
 from app.extraction.normalization import DateNormalizer, FieldNormalizer
-from app.extraction.ocr import FieldExtractor, PaddleOCREngine, TesseractOCREngine
+from app.extraction.ocr import EasyOCREngine, FieldExtractor, PaddleOCREngine
 
 logger = get_logger(__name__)
 
@@ -21,8 +21,8 @@ class ExtractionService:
     """Service for extracting passport data from images."""
 
     def __init__(self) -> None:
-        self.tesseract = TesseractOCREngine()
         self.paddle = PaddleOCREngine()
+        self.easyocr = EasyOCREngine()
         self.mrz_detector = MRZDetector()
         self.field_extractor = FieldExtractor()
         self.mrz_parser = MRZParser()
@@ -60,58 +60,108 @@ class ExtractionService:
         except Exception as e:
             logger.warning("MRZ detection failed", error=str(e))
 
-        # OCR extraction
+        # --- OCR: PaddleOCR primary, EasyOCR fallback ---
         ocr_text = ""
         ocr_engine = None
 
-        if settings.ocr_engine in ("tesseract", "both"):
-            if self.tesseract.is_available():
-                try:
-                    ocr_text = self.tesseract.extract_text(image_path)
-                    ocr_engine = "tesseract"
-                    logger.info("Tesseract OCR completed")
-                except OCRError as e:
-                    logger.warning("Tesseract OCR failed", error=str(e))
+        if self.paddle.is_available():
+            try:
+                ocr_text = self.paddle.extract_text(image_path)
+                ocr_engine = "paddle"
+                logger.info("PaddleOCR completed")
+            except OCRError as e:
+                logger.warning("PaddleOCR failed", error=str(e))
 
-        if settings.ocr_engine in ("paddle", "both") and not ocr_text:
-            if self.paddle.is_available():
-                try:
-                    ocr_text = self.paddle.extract_text(image_path)
-                    ocr_engine = "paddle"
-                    logger.info("PaddleOCR completed")
-                except OCRError as e:
-                    logger.warning("PaddleOCR failed", error=str(e))
+        if not ocr_text and self.easyocr.is_available():
+            try:
+                ocr_text = self.easyocr.extract_text(image_path)
+                ocr_engine = "easyocr"
+                logger.info("EasyOCR completed")
+            except OCRError as e:
+                logger.warning("EasyOCR failed", error=str(e))
 
         if not ocr_text:
-            raise ExtractionError("No OCR engine available or extraction failed")
+            raise ExtractionError("No OCR engine produced output")
 
         result["ocr_engine_used"] = ocr_engine
 
-        # Extract MRZ from OCR text
-        mrz_lines = self.field_extractor.extract_mrz_lines(ocr_text)
-        if mrz_lines:
-            try:
-                mrz_data = self.mrz_parser.auto_parse("\n".join(mrz_lines))
-                mrz_dict = mrz_data.to_dict()
+        def _try_parse_mrz(text: str) -> dict | None:
+            from app.extraction.mrz.check_digits import MRZCheckDigitValidator
 
-                # Normalize dates
+            lines = self.field_extractor.extract_mrz_lines(text)
+            if not lines:
+                return None
+            try:
+                mrz_data = self.mrz_parser.auto_parse("\n".join(lines))
+                mrz_dict = mrz_data.to_dict()
                 if mrz_dict.get("birth_date"):
                     mrz_dict["birth_date_normalized"] = self.date_normalizer.normalize(mrz_dict["birth_date"])
                 if mrz_dict.get("expiry_date"):
                     mrz_dict["expiry_date_normalized"] = self.date_normalizer.normalize(mrz_dict["expiry_date"])
 
-                result["mrz_data"] = mrz_dict
-                result["mrz_detected"] = True
-                logger.info("MRZ parsed successfully", mrz_type=mrz_data.mrz_type)
+                # Score check digits — gives a real 0.0–1.0 confidence signal.
+                # Use correct ICAO positions directly for the 3 individual TD3 checks.
+                check_score: float | None = None
+                try:
+                    if mrz_data.mrz_type == "TD3" and len(lines) == 2 and len(lines[1]) == 44:
+                        l2 = lines[1]
+                        checks = [
+                            MRZCheckDigitValidator.validate_check_digit(l2[0:9], l2[9]),   # doc number
+                            MRZCheckDigitValidator.validate_check_digit(l2[13:19], l2[19]),  # birth date
+                            MRZCheckDigitValidator.validate_check_digit(l2[21:27], l2[27]),  # expiry date
+                        ]
+                        check_score = sum(checks) / len(checks)
+                    elif mrz_data.mrz_type == "TD1" and len(lines) == 3:
+                        l1, l2 = lines[0], lines[1]
+                        checks = [
+                            MRZCheckDigitValidator.validate_check_digit(l1[5:14], l1[14]),   # doc number
+                            MRZCheckDigitValidator.validate_check_digit(l2[0:6], l2[6]),     # birth date
+                            MRZCheckDigitValidator.validate_check_digit(l2[8:14], l2[14]),   # expiry date
+                        ]
+                        check_score = sum(checks) / len(checks)
+                    elif mrz_data.mrz_type == "TD2" and len(lines) == 2 and len(lines[1]) == 36:
+                        l2 = lines[1]
+                        checks = [
+                            MRZCheckDigitValidator.validate_check_digit(l2[0:9], l2[9]),    # doc number
+                            MRZCheckDigitValidator.validate_check_digit(l2[13:19], l2[19]), # birth date
+                            MRZCheckDigitValidator.validate_check_digit(l2[21:27], l2[27]), # expiry date
+                        ]
+                        check_score = sum(checks) / len(checks)
+                except Exception:
+                    pass
+
+                mrz_dict["check_digit_score"] = check_score
+                logger.info("MRZ parsed successfully", mrz_type=mrz_data.mrz_type, check_score=check_score)
+                return mrz_dict
             except Exception as e:
                 logger.warning("MRZ parsing failed", error=str(e))
+                return None
 
-        # Extract fields from OCR text
+        # Try MRZ from primary OCR
+        mrz_dict = _try_parse_mrz(ocr_text)
+
+        # If PaddleOCR got text but MRZ parsing failed, retry with EasyOCR
+        if mrz_dict is None and ocr_engine == "paddle" and self.easyocr.is_available():
+            logger.info("PaddleOCR MRZ parse failed — retrying with EasyOCR")
+            try:
+                easy_text = self.easyocr.extract_text(image_path)
+                if easy_text:
+                    mrz_dict = _try_parse_mrz(easy_text)
+                    if mrz_dict:
+                        ocr_text = easy_text
+                        result["ocr_engine_used"] = "easyocr"
+            except Exception as e:
+                logger.warning("EasyOCR fallback failed", error=str(e))
+
+        if mrz_dict is not None:
+            result["mrz_data"] = mrz_dict
+            result["mrz_detected"] = True
+
+        # Extract visible fields from OCR text
         try:
             ocr_fields = self.field_extractor.extract_fields(ocr_text)
             result["ocr_fields"] = ocr_fields
 
-            # Normalize fields
             normalized = {}
             for field_name, value in ocr_fields.items():
                 if field_name in ("document_number", "passport_number"):
@@ -134,48 +184,3 @@ class ExtractionService:
 
         logger.info("Extraction completed", mrz_detected=result["mrz_detected"])
         return result
-
-    def benchmark_ocr_engines(self, image_path: Path) -> dict[str, Any]:
-        """Benchmark both OCR engines on an image."""
-        logger.info("Benchmarking OCR engines", image_path=str(image_path))
-
-        results = {
-            "tesseract": {"available": False, "text": "", "time_ms": 0},
-            "paddle": {"available": False, "text": "", "time_ms": 0},
-        }
-
-        import time
-
-        # Benchmark Tesseract
-        if self.tesseract.is_available():
-            try:
-                start = time.time()
-                text = self.tesseract.extract_text(image_path)
-                elapsed = (time.time() - start) * 1000
-                results["tesseract"] = {
-                    "available": True,
-                    "text": text,
-                    "time_ms": elapsed,
-                    "text_length": len(text),
-                }
-                logger.info("Tesseract benchmark completed", time_ms=elapsed)
-            except Exception as e:
-                logger.warning("Tesseract benchmark failed", error=str(e))
-
-        # Benchmark PaddleOCR
-        if self.paddle.is_available():
-            try:
-                start = time.time()
-                text = self.paddle.extract_text(image_path)
-                elapsed = (time.time() - start) * 1000
-                results["paddle"] = {
-                    "available": True,
-                    "text": text,
-                    "time_ms": elapsed,
-                    "text_length": len(text),
-                }
-                logger.info("PaddleOCR benchmark completed", time_ms=elapsed)
-            except Exception as e:
-                logger.warning("PaddleOCR benchmark failed", error=str(e))
-
-        return results
