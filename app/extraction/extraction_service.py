@@ -86,6 +86,8 @@ class ExtractionService:
         result["ocr_engine_used"] = ocr_engine
 
         def _try_parse_mrz(text: str) -> dict | None:
+            from app.extraction.mrz.check_digits import MRZCheckDigitValidator
+
             lines = self.field_extractor.extract_mrz_lines(text)
             if not lines:
                 return None
@@ -96,7 +98,40 @@ class ExtractionService:
                     mrz_dict["birth_date_normalized"] = self.date_normalizer.normalize(mrz_dict["birth_date"])
                 if mrz_dict.get("expiry_date"):
                     mrz_dict["expiry_date_normalized"] = self.date_normalizer.normalize(mrz_dict["expiry_date"])
-                logger.info("MRZ parsed successfully", mrz_type=mrz_data.mrz_type)
+
+                # Score check digits — gives a real 0.0–1.0 confidence signal.
+                # Use correct ICAO positions directly for the 3 individual TD3 checks.
+                check_score: float | None = None
+                try:
+                    if mrz_data.mrz_type == "TD3" and len(lines) == 2 and len(lines[1]) == 44:
+                        l2 = lines[1]
+                        checks = [
+                            MRZCheckDigitValidator.validate_check_digit(l2[0:9], l2[9]),   # doc number
+                            MRZCheckDigitValidator.validate_check_digit(l2[13:19], l2[19]),  # birth date
+                            MRZCheckDigitValidator.validate_check_digit(l2[21:27], l2[27]),  # expiry date
+                        ]
+                        check_score = sum(checks) / len(checks)
+                    elif mrz_data.mrz_type == "TD1" and len(lines) == 3:
+                        l1, l2 = lines[0], lines[1]
+                        checks = [
+                            MRZCheckDigitValidator.validate_check_digit(l1[5:14], l1[14]),   # doc number
+                            MRZCheckDigitValidator.validate_check_digit(l2[0:6], l2[6]),     # birth date
+                            MRZCheckDigitValidator.validate_check_digit(l2[8:14], l2[14]),   # expiry date
+                        ]
+                        check_score = sum(checks) / len(checks)
+                    elif mrz_data.mrz_type == "TD2" and len(lines) == 2 and len(lines[1]) == 36:
+                        l2 = lines[1]
+                        checks = [
+                            MRZCheckDigitValidator.validate_check_digit(l2[0:9], l2[9]),    # doc number
+                            MRZCheckDigitValidator.validate_check_digit(l2[13:19], l2[19]), # birth date
+                            MRZCheckDigitValidator.validate_check_digit(l2[21:27], l2[27]), # expiry date
+                        ]
+                        check_score = sum(checks) / len(checks)
+                except Exception:
+                    pass
+
+                mrz_dict["check_digit_score"] = check_score
+                logger.info("MRZ parsed successfully", mrz_type=mrz_data.mrz_type, check_score=check_score)
                 return mrz_dict
             except Exception as e:
                 logger.warning("MRZ parsing failed", error=str(e))
