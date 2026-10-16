@@ -24,6 +24,13 @@ class Settings(BaseSettings):
     ocr_engine: Literal["paddle", "easyocr"] = "paddle"
     ocr_confidence_threshold: float = Field(default=0.7)
 
+    # Upload limits
+    max_upload_mb: int = 10
+    allowed_upload_types: list[str] = [
+        "image/jpeg", "image/jpg", "image/png", "image/webp", "application/pdf",
+    ]
+    allowed_upload_extensions: str = ".jpg,.jpeg,.png,.webp,.pdf"  # also read by the frontend
+
     # Image quality thresholds
     min_image_width: int = 800
     min_image_height: int = 600
