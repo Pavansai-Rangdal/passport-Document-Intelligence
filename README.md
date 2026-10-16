@@ -1,373 +1,308 @@
-# Passport Document Intelligence
+# Passport Expiry Checker
 
-A production-ready, secure document-intelligence pipeline for passport image extraction, validation, and evidence-based decisions using Python, FastAPI, PostgreSQL, SQLAlchemy, Alembic, Redis, Celery, OpenCV, Pillow, PyMuPDF, and interchangeable OCR engines (PaddleOCR and Tesseract).
+A web application that reads the Machine Readable Zone (MRZ) of passport images and reports whether each passport is **expired**, **valid**, or **unknown**. Upload one or many files and watch results appear as each file finishes processing.
+
+## Table of Contents
+
+- [Overview](#overview)
+- [Features](#features)
+- [Architecture](#architecture)
+  - [System Context](#system-context)
+  - [Processing Pipeline](#processing-pipeline)
+  - [Backend Modules](#backend-modules)
+  - [OCR Strategy](#ocr-strategy)
+- [Tech Stack](#tech-stack)
+- [Project Structure](#project-structure)
+- [Getting Started](#getting-started)
+  - [Prerequisites](#prerequisites)
+  - [Installation](#installation)
+  - [Running Locally](#running-locally)
+  - [Docker](#docker)
+- [Configuration](#configuration)
+- [API Reference](#api-reference)
+- [Confidence Scoring](#confidence-scoring)
+- [Development](#development)
+- [Known Limitations](#known-limitations)
+
+## Overview
+
+Passport expiry is encoded in the two-line (TD3) or three-line (TD1) MRZ printed on identity documents, following ICAO Doc 9303. This service locates the MRZ, extracts it with OCR, validates it using the ICAO check digits, and compares the expiry date with today's date.
+
+Processing is deterministic: no machine-learning classifier decides the outcome. OCR produces text, and a rule-based parser and date comparison produce the verdict.
 
 ## Features
 
-- **Secure File Intake**: Upload validation, malware detection, deduplication via SHA-256 hashing
-- **Document Detection**: OpenCV-based boundary detection and MRZ (Machine Readable Zone) detection
-- **Image Quality Assessment**: Blur detection, brightness analysis, dimension validation
-- **Dual OCR Engines**: Support for PaddleOCR and Tesseract with automatic fallback
-- **MRZ Parsing**: ICAO Doc 9303 compliant TD1, TD2, and TD3 format parsing
-- **Check Digit Validation**: Full ICAO MRZ checksum validation
-- **Field Extraction & Normalization**: Extracted fields with date and field normalization
-- **Comprehensive Validation**: Schema, expiry, image quality, cross-field, MRZ checksum, and consistency rules
-- **Verification Providers**: Capability registry for external verification services
-- **System One Integration**: Typed adapter for external decision model integration
-- **Deterministic Policy Engine**: Independent policy engine with PASS_SCREENING, FAIL_RULE, REVIEW_REQUIRED, and INSUFFICIENT_DATA outcomes
-- **Evidence Ledger**: Complete audit trail of all verification evidence
-- **Background Processing**: Celery-based async document processing
-- **Data Retention**: Configurable retention policies for documents and audit logs
-- **REST API**: FastAPI-based RESTful API for all operations
-- **Docker Support**: Complete Docker Compose deployment
+- Batch upload of multiple images in a single request
+- Streamed results: each file's verdict is shown as soon as it is ready
+- Dual OCR engines with automatic fallback (PaddleOCR primary, EasyOCR secondary)
+- ICAO 9303 MRZ parsing for TD1, TD2 and TD3 formats
+- Check-digit validation that drives a per-file confidence score
+- Per-file error isolation: one bad file never fails the batch
+- Upload limits, accepted file types and timeouts configured through `.env`
+- Structured JSON logging
 
 ## Architecture
 
-The system follows a modular architecture with clear separation of concerns:
+### System Context
 
 ```
-app/
-├── api/                    # FastAPI routes and endpoints
-├── audit/                  # Audit logging and evidence ledger
-├── core/                   # Configuration, logging, security
-├── db/                     # Database models, session, repositories
-├── decision/               # Decision service and System One integration
-├── document_processing/    # Document detection, preprocessing, PDF rendering
-├── extraction/             # OCR engines, MRZ parsing, field normalization
-├── intake/                 # File validation, batch management
-├── policy/                 # Deterministic policy engine
-├── reporting/              # Batch report generation
-├── schemas/                # Pydantic schemas for API
-├── storage/                # Object store and retention policies
-├── utils/                  # Identifier generation
-├── validation/             # Validation engine and rules
-├── verification/           # Verification provider registry
-└── workers/                # Celery background tasks
+┌──────────────────────┐   /api, /health    ┌──────────────────────────────┐
+│  React SPA           │ ─────────────────▶ │  FastAPI backend             │
+│  (Vite dev server    │   multipart upload │                              │
+│   or static build)   │ ◀───────────────── │  POST /api/v1/classify       │
+│                      │   NDJSON stream    │  POST /api/v1/classify/stream│
+└──────────────────────┘                    │  GET  /health                │
+                                            └──────────────┬───────────────┘
+                                                           │
+                                            ┌──────────────▼───────────────┐
+                                            │  Extraction service          │
+                                            │  PaddleOCR ─▶ EasyOCR (fallback)
+                                            └──────────────────────────────┘
 ```
 
-## Prerequisites
+During development the Vite dev server proxies `/api` and `/health` to the backend, so the browser only ever talks to one origin.
 
-- Python 3.11+
-- PostgreSQL 16+
-- Redis 7+
-- uv (Python package manager)
-- (Optional) Tesseract OCR binary for Tesseract engine
-- (Optional) CUDA for PaddleOCR GPU acceleration
+### Processing Pipeline
 
-## Installation
+Each uploaded file passes through the same stages:
 
-### Local Development
+```
+Upload ─▶ Validate ─▶ Quality check ─▶ MRZ zone detection ─▶ OCR
+                                                                │
+Verdict ◀─ Confidence ◀─ Expiry vs. today ◀─ MRZ parse ◀────────┘
+                                          (check digits, date normalization)
+```
 
-1. **Clone the repository**:
-   ```bash
-   git clone <repository-url>
-   cd Passport-Document-Intelligence
-   ```
+1. **Validate**: content type, file extension and size are checked against configured limits.
+2. **Quality check**: resolution, blur and brightness are measured for diagnostics.
+3. **MRZ detection**: OpenCV locates the MRZ region.
+4. **OCR**: the bottom of the page (the MRZ zone) and the full page are read.
+5. **Parse**: MRZ lines are extracted from the OCR text and parsed by document type (TD1, TD2 or TD3).
+6. **Decide**: the expiry date is normalized and compared with the current date, and a confidence score is derived from the check digits.
 
-2. **Install dependencies with uv**:
-   ```bash
-   uv sync
-   ```
+### Backend Modules
 
-3. **Configure environment variables**:
-   ```bash
-   cp .env.example .env
-   # Edit .env with your configuration
-   ```
+| Module | Responsibility |
+| --- | --- |
+| `app/api` | FastAPI routers: classification (batch and streaming) and health |
+| `app/core` | Settings, structured logging, exceptions |
+| `app/document_processing` | Image loading, quality assessment, enhancement, MRZ and document detection, PDF renderer |
+| `app/extraction` | Extraction service, OCR engines, MRZ parser and check digits, field and date normalization |
+| `app/schemas` | Pydantic request and response models |
 
-4. **Set up PostgreSQL**:
-   ```bash
-   # Using Docker
-   docker run -d --name passport_db \
-     -e POSTGRES_USER=postgres \
-     -e POSTGRES_PASSWORD=postgres \
-     -e POSTGRES_DB=passport_db \
-     -p 5432:5432 \
-     postgres:16-alpine
-   ```
+### OCR Strategy
 
-5. **Set up Redis**:
-   ```bash
-   docker run -d --name passport_redis -p 6379:6379 redis:7-alpine
-   ```
+- **PaddleOCR** runs first. It reads the bottom 28% of the image, where the MRZ sits, and then the full page.
+- **EasyOCR** performs the same two passes, but only when PaddleOCR returns no text or its text yields no parsable MRZ. Its MRZ pass is restricted to the characters `A-Z`, `0-9` and `<`.
+- OCR runs in a worker thread, so a slow file does not block the server while earlier results are being streamed.
 
-6. **Run database migrations**:
-   ```bash
-   uv run alembic upgrade head
-   ```
+## Tech Stack
 
-7. **Start the application**:
-   ```bash
-   uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8888
-   ```
+| Layer | Technology | Version |
+| --- | --- | --- |
+| Language | Python | 3.11+ (developed on 3.12) |
+| Web framework | FastAPI, Uvicorn | 0.115+ |
+| Validation and settings | Pydantic, pydantic-settings | 2.x |
+| Primary OCR | PaddleOCR, PaddlePaddle (CPU), PaddleX | 3.7.0, 3.3.1, 3.7.2 |
+| Fallback OCR | EasyOCR on PyTorch | 1.7.2 |
+| OCR models | PP-OCRv6 medium (detection and recognition), CRAFT, English g2 | n/a |
+| Image processing | OpenCV (headless), Pillow, NumPy, scikit-image | 4.x, 12.x, 2.x, 0.26 |
+| PDF rendering | PyMuPDF | 1.25+ |
+| Logging | structlog | 25.x |
+| Frontend | React, React Router, Axios | 18, 6, 1.x |
+| Frontend tooling | Vite, Tailwind CSS, PostCSS | 5, 3, 8 |
+| Packaging | uv, Hatchling | n/a |
+| Tooling | Ruff, mypy, pytest | n/a |
+| Container | Docker | n/a |
 
-### Docker Deployment
+## Project Structure
 
-1. **Build and start services**:
-   ```bash
-   docker-compose up -d
-   ```
+```
+.
+├── app/
+│   ├── api/routes/            # classify.py, health.py
+│   ├── core/                  # config.py, logging.py, exceptions.py
+│   ├── document_processing/   # detection/, preprocessing/, pdf_renderer.py
+│   ├── extraction/            # extraction_service.py, ocr/, mrz/, normalization/
+│   ├── schemas/               # classify.py, common.py
+│   └── main.py                # FastAPI entry point
+├── frontend/
+│   ├── src/
+│   │   ├── api/client.js      # classify and streaming clients
+│   │   ├── pages/Classifier.jsx
+│   │   ├── config.js          # values injected from .env
+│   │   └── App.jsx
+│   └── vite.config.js
+├── docker/Dockerfile
+├── scripts/test_extraction.py # run extraction over a folder of samples
+├── .env.example
+└── pyproject.toml
+```
 
-2. **Run migrations**:
-   ```bash
-   docker-compose exec web uv run alembic upgrade head
-   ```
+## Getting Started
 
-3. **Access the API**:
-   ```
-   http://localhost:8888
-   http://localhost:8888/docs (Swagger UI)
-   ```
+### Prerequisites
+
+- Python 3.11 or newer
+- [uv](https://docs.astral.sh/uv/)
+- Node.js 18 or newer
+- About 300 MB of disk for OCR models, which download on first use
+
+### Installation
+
+```bash
+# Backend
+uv sync
+
+# Frontend
+cd frontend
+npm install
+```
+
+Create your environment file from the template:
+
+```bash
+cp .env.example .env
+```
+
+### Running Locally
+
+Start the backend (port `8888` by default):
+
+```bash
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8888
+```
+
+Start the frontend in a second terminal:
+
+```bash
+cd frontend
+npm run dev
+```
+
+| Service | URL |
+| --- | --- |
+| Web app | http://localhost:3000 |
+| API | http://localhost:8888 |
+| Interactive API docs | http://localhost:8888/docs |
+
+The first request is slow because the OCR models are loaded and, on a fresh machine, downloaded.
+
+### Docker
+
+```bash
+docker build -f docker/Dockerfile -t passport-expiry-checker .
+docker run -p 8888:8888 passport-expiry-checker
+```
+
+The image contains the backend only. `.env` is not copied into the image, so pass settings with `-e` flags or `--env-file`.
 
 ## Configuration
 
-Key environment variables (see `.env.example`):
+All settings are read from `.env`. The frontend build reads the upload settings from the same file.
 
-- `DATABASE_URL`: PostgreSQL connection string
-- `REDIS_URL`: Redis connection string
-- `CELERY_BROKER_URL`: Celery broker URL
-- `CELERY_RESULT_BACKEND`: Celery result backend
-- `OCR_ENGINE`: `paddle`, `tesseract`, or `both`
-- `STORAGE_MAX_FILE_SIZE`: Maximum upload size in bytes (default: 10MB)
-- `RETENTION_DAYS`: Document retention period (default: 90 days)
-- `SYSTEM_ONE_ENABLED`: Enable System One integration
-- `SYSTEM_ONE_API_URL`: System One API endpoint
-- `SYSTEM_ONE_API_KEY`: System One API key
+| Variable | Default | Description |
+| --- | --- | --- |
+| `HOST` | `0.0.0.0` | Backend bind address |
+| `PORT` | `8888` | Backend port, also used by the dev proxy |
+| `FRONTEND_PORT` | `3000` | Vite dev server port |
+| `MAX_UPLOAD_MB` | `10` | Maximum size of each uploaded file |
+| `ALLOWED_UPLOAD_EXTENSIONS` | `.jpg,.jpeg,.png,.webp,.pdf` | Accepted extensions, shared by backend and frontend |
+| `REQUEST_TIMEOUT_MS` | `600000` | Frontend request timeout |
+| `OCR_ENGINE` | `paddle` | Reserved. Engine order is currently fixed in code (PaddleOCR, then EasyOCR) |
+| `OCR_CONFIDENCE_THRESHOLD` | `0.7` | Reserved. Not used by the pipeline yet |
+| `MIN_IMAGE_WIDTH`, `MIN_IMAGE_HEIGHT` | `800`, `600` | Image quality thresholds |
+| `MAX_BLUR_SCORE` | `100.0` | Maximum blur score |
+| `MIN_BRIGHTNESS`, `MAX_BRIGHTNESS` | `50.0`, `200.0` | Brightness bounds |
+| `LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING` or `ERROR` |
+| `LOG_FORMAT` | `json` | `json` or `text` |
 
-## API Usage
+## API Reference
 
-### Health Check
-```bash
-GET /health
+### `GET /health`
+
+Returns service status.
+
+```json
+{ "status": "healthy", "version": "0.1.0", "environment": "development" }
 ```
 
-### Upload Document
-```bash
-POST /api/v1/upload
-Content-Type: multipart/form-data
+### `POST /api/v1/classify`
 
-file: <passport_image>
+Accepts one or more files in the multipart field `files` and returns a JSON array with one result per file.
+
+```bash
+curl -X POST http://localhost:8888/api/v1/classify \
+  -F "files=@passport-1.jpg" \
+  -F "files=@passport-2.png"
 ```
 
-Response:
+### `POST /api/v1/classify/stream`
+
+Same input as `/classify`. The response is `application/x-ndjson`: one JSON result per line, sent as each file completes, in upload order.
+
+### Result object
+
 ```json
 {
-  "document_id": "uuid",
-  "internal_id": "doc_20261009_1200_abc123",
-  "filename": "passport.jpg",
-  "status": "uploaded",
-  "created_at": "2026-10-09T12:00:00Z"
-}
-```
-
-### Get Document
-```bash
-GET /api/v1/documents/{document_id}
-```
-
-### Extract Data
-```bash
-POST /api/v1/documents/{document_id}/extract
-```
-
-Response:
-```json
-{
-  "document_id": "uuid",
-  "mrz_detected": true,
-  "mrz_data": {
-    "document_type": "P",
-    "issuing_state": "USA",
-    "document_number": "A12345678",
-    "birth_date": "1980-01-01",
-    "expiry_date": "2030-01-01",
-    "sex": "M"
-  },
-  "ocr_fields": {...},
-  "quality": {...}
-}
-```
-
-### Make Decision
-```bash
-POST /api/v1/documents/{document_id}/decide
-```
-
-Response:
-```json
-{
-  "decision_id": "uuid",
-  "outcome": "pass_screening",
+  "expired": false,
+  "expiry_date": "2034-02-08",
   "confidence": 0.95,
-  "reasoning": "All validations passed",
-  "system_one_recommendation": "pass",
-  "policy_version": "1.0",
-  "triggered_rules": []
+  "mrz_detected": true,
+  "method": "mrz_extraction",
+  "message": "Passport is valid until 2034-02-08",
+  "filename": "passport-1.jpg"
 }
 ```
 
-### Batch Operations
+| Field | Description |
+| --- | --- |
+| `expired` | `true`, `false`, or `null` when the expiry could not be determined |
+| `expiry_date` | ISO date (`YYYY-MM-DD`) or `null` |
+| `confidence` | Value between 0 and 1, see below |
+| `mrz_detected` | Whether an MRZ was found and parsed |
+| `method` | `mrz_extraction`, or `error` when the file could not be processed |
+| `message` | Human-readable summary |
+| `filename` | Name of the uploaded file |
+
+Files with an unsupported type or extension, or over the size limit, return a result with `method: "error"` and an explanatory `message`. They do not fail the request.
+
+## Confidence Scoring
+
+Confidence is derived from the ICAO check digits for the document number, date of birth and expiry date.
+
+| Situation | Confidence |
+| --- | --- |
+| Expiry read, all check digits pass | 0.95 |
+| Expiry read, all check digits fail | 0.50 |
+| MRZ found but expiry unreadable | 0.20 to 0.45 |
+| No MRZ detected | 0.10 |
+| File could not be processed | 0.00 |
+
+## Development
+
 ```bash
-# Create batch
-POST /api/v1/batches
+# Lint and format
+uv run ruff check app/
+uv run ruff format app/
 
-# Get batch status
-GET /api/v1/batches/{batch_id}
-```
-
-## Decision Outcomes
-
-The system returns one of four deterministic outcomes:
-
-- **PASS_SCREENING**: Document passed all validation rules
-- **FAIL_RULE**: Document failed critical validation rules
-- **REVIEW_REQUIRED**: Document has warnings or low confidence
-- **INSUFFICIENT_DATA**: Missing critical data (e.g., no MRZ)
-
-## Policy Rules
-
-The policy engine applies deterministic rules in order:
-
-1. Critical validation errors → FAIL_RULE
-2. System One high-confidence fail → FAIL_RULE
-3. System One review recommendation → REVIEW_REQUIRED
-4. System One low confidence → REVIEW_REQUIRED
-5. Validation warnings → REVIEW_REQUIRED
-6. Insufficient MRZ data → INSUFFICIENT_DATA
-7. All validations passed → PASS_SCREENING
-
-## OCR Engine Installation
-
-### Tesseract
-```bash
-# Ubuntu/Debian
-sudo apt-get install tesseract-ocr
-
-# macOS
-brew install tesseract
-
-# Windows
-# Download from: https://github.com/UB-Mannheim/tesseract/wiki
-```
-
-### PaddleOCR
-```bash
-# CPU version
-uv sync --extra ocr-paddle
-
-# GPU version (requires CUDA)
-uv sync --extra ocr-paddle
-```
-
-## Testing
-
-### Run Tests
-```bash
-uv run pytest tests/
-```
-
-### Test Extraction on Sample Files
-```bash
+# Run extraction over a folder of sample images
 uv run python scripts/test_extraction.py
+
+# Frontend production build
+cd frontend
+npm run build
 ```
 
-### Benchmark OCR Engines
-```python
-from app.extraction import ExtractionService
+Notes for working on OCR:
 
-service = ExtractionService()
-results = service.benchmark_ocr_engines("sample-passports/sample-1.jpg")
-print(results)
-```
+- PaddleOCR is created with `enable_mkldnn=False`. oneDNN in PaddlePaddle 3.3.x raises a runtime error on some CPU builds.
+- PaddleOCR 3.x returns dict-like result objects. Read them with the `_page_field` helper in `app/extraction/ocr/paddle_ocr.py`.
+- On Windows, run with `PYTHONUTF8=1` when scripts print OCR text, to avoid console encoding errors.
 
-## Integrations Requiring External Credentials
+## Known Limitations
 
-### System One Integration
-
-To enable System One decision model integration:
-
-1. Set environment variables:
-   ```
-   SYSTEM_ONE_ENABLED=true
-   SYSTEM_ONE_API_URL=https://api.system-one.example.com
-   SYSTEM_ONE_API_KEY=your-api-key
-   ```
-
-2. The system will automatically:
-   - Send extraction results, validation findings, and evidence
-   - Validate the response structure
-   - Pass the recommendation to the independent policy engine
-
-### Chip Authentication
-
-Chip authentication requires:
-- NFC reader hardware
-- ICAO 9303 compliant ePassport
-- Additional configuration (not enabled by default)
-
-### Lost/Stolen Verification
-
-Lost/stolen database verification requires:
-- External API credentials
-- Country-specific database access
-- Additional configuration (not enabled by default)
-
-## Security Considerations
-
-- **File Validation**: All uploads are validated for MIME type, size, and integrity
-- **Malware Detection**: Basic malformed file detection
-- **Encryption**: Sensitive fields are encrypted at rest
-- **Access Control**: API key authentication (optional)
-- **Rate Limiting**: Configurable upload rate limits
-- **Data Redaction**: Sensitive fields are redacted in logs
-- **Retention Policies**: Automatic cleanup of expired data
-
-## Limitations
-
-1. **OCR Availability**: Requires Tesseract binary or PaddleOCR installation
-2. **Database Required**: PostgreSQL must be running for full functionality
-3. **Sample Files**: The provided sample files may not contain actual MRZ data
-4. **External Integrations**: System One, chip auth, and lost/stolen verification require external credentials
-5. **Windows Tesseract**: Tesseract binary must be manually installed and added to PATH
-
-## Troubleshooting
-
-### Database Connection Error
-```
-Error: password authentication failed for user "postgres"
-```
-Solution: Ensure PostgreSQL is running and credentials match `.env` configuration
-
-### OCR Engine Not Available
-```
-Error: No OCR engine available or extraction failed
-```
-Solution: Install Tesseract or PaddleOCR (see OCR Engine Installation section)
-
-### MRZ Not Detected
-The sample files may not contain visible MRZ regions. The MRZ detection algorithm looks for:
-- Wide, short text regions at the bottom of the image
-- Aspect ratio between 5:1 and 15:1
-- Height between 20-60 pixels
-
-### Migration Errors
-```bash
-# Reset migrations
-uv run alembic downgrade base
-uv run alembic upgrade head
-```
-
-## Performance Notes
-
-- **Processing Time**: Extraction typically takes 2-5 seconds per document
-- **Memory Usage**: ~200MB per concurrent extraction
-- **Database Pool**: Configurable pool size (default: 10 connections)
-- **Celery Workers**: Scale workers based on load
-
-## License
-
-Proprietary
-
-## Support
-
-For support, contact the development team or create an issue in the repository.
+- PDF uploads are accepted, but the PDF renderer is not yet connected to the extraction step, so PDFs are not read.
+- OCR runs on CPU. Large images can take around a minute each; the streamed output keeps the interface responsive.
+- Only passports with a readable MRZ can be classified. Documents without one return `unknown`.
+- The project has no automated test suite yet.
