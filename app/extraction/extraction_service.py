@@ -3,6 +3,8 @@
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
 from app.core.config import get_settings
 from app.core.exceptions import ExtractionError, OCRError
 from app.core.logging import get_logger
@@ -16,6 +18,10 @@ logger = get_logger(__name__)
 
 settings = get_settings()
 
+# MRZ strip tried first (bottom 28% of the page), then a taller one for cropped/odd layouts
+_MRZ_TOP_FRACTIONS = (0.72, 0.5)
+_MRZ_STRIP_MAX_WIDTH = 1000
+
 
 class ExtractionService:
     """Service for extracting passport data from images."""
@@ -28,6 +34,17 @@ class ExtractionService:
         self.mrz_parser = MRZParser()
         self.date_normalizer = DateNormalizer()
         self.field_normalizer = FieldNormalizer()
+
+    @staticmethod
+    def _mrz_strip(image_path: Path, top_fraction: float) -> Image.Image:
+        """Bottom of the page from top_fraction down (the MRZ zone), downscaled so OCR cost doesn't grow with photo size."""
+        with Image.open(image_path) as img:
+            w, h = img.size
+            strip = img.crop((0, int(h * top_fraction), w, h)).convert("RGB")
+        if strip.width > _MRZ_STRIP_MAX_WIDTH:
+            ratio = _MRZ_STRIP_MAX_WIDTH / strip.width
+            strip = strip.resize((_MRZ_STRIP_MAX_WIDTH, max(1, int(strip.height * ratio))))
+        return strip
 
     def extract_from_image(self, image_path: Path) -> dict[str, Any]:
         """Extract all passport data from an image."""
@@ -59,31 +76,6 @@ class ExtractionService:
                 logger.info("MRZ detected", bbox=mrz_detection["bounding_box"])
         except Exception as e:
             logger.warning("MRZ detection failed", error=str(e))
-
-        # --- OCR: PaddleOCR primary, EasyOCR fallback ---
-        ocr_text = ""
-        ocr_engine = None
-
-        if self.paddle.is_available():
-            try:
-                ocr_text = self.paddle.extract_text(image_path)
-                ocr_engine = "paddle"
-                logger.info("PaddleOCR completed")
-            except OCRError as e:
-                logger.warning("PaddleOCR failed", error=str(e))
-
-        if not ocr_text and self.easyocr.is_available():
-            try:
-                ocr_text = self.easyocr.extract_text(image_path)
-                ocr_engine = "easyocr"
-                logger.info("EasyOCR completed")
-            except OCRError as e:
-                logger.warning("EasyOCR failed", error=str(e))
-
-        if not ocr_text:
-            raise ExtractionError("No OCR engine produced output")
-
-        result["ocr_engine_used"] = ocr_engine
 
         def _try_parse_mrz(text: str) -> dict | None:
             from app.extraction.mrz.check_digits import MRZCheckDigitValidator
@@ -137,21 +129,78 @@ class ExtractionService:
                 logger.warning("MRZ parsing failed", error=str(e))
                 return None
 
-        # Try MRZ from primary OCR
-        mrz_dict = _try_parse_mrz(ocr_text)
+        def _score(mrz: dict) -> float:
+            return mrz.get("check_digit_score") or 0.0
 
-        # If PaddleOCR got text but MRZ parsing failed, retry with EasyOCR
-        if mrz_dict is None and ocr_engine == "paddle" and self.easyocr.is_available():
-            logger.info("PaddleOCR MRZ parse failed — retrying with EasyOCR")
+        # --- Fast path: OCR only the MRZ strip. EasyOCR reads (fast), PaddleOCR re-reads
+        # (accurate) only if the MRZ check digits don't all pass. ---
+        ocr_text = ""
+        ocr_engine = None
+        mrz_dict = None
+        for top_fraction in _MRZ_TOP_FRACTIONS:
+            if mrz_dict is not None:
+                break
             try:
-                easy_text = self.easyocr.extract_text(image_path)
-                if easy_text:
-                    mrz_dict = _try_parse_mrz(easy_text)
-                    if mrz_dict:
-                        ocr_text = easy_text
-                        result["ocr_engine_used"] = "easyocr"
+                strip = self._mrz_strip(image_path, top_fraction)
             except Exception as e:
-                logger.warning("EasyOCR fallback failed", error=str(e))
+                logger.warning("MRZ strip crop failed", error=str(e))
+                break
+
+            for engine in (self.easyocr, self.paddle):
+                if not engine.is_available():
+                    continue
+                try:
+                    text = engine.extract_mrz_text(strip)
+                except OCRError as e:
+                    logger.warning("MRZ strip OCR failed", engine=engine.get_name(), error=str(e))
+                    continue
+                parsed = _try_parse_mrz(text)
+                if parsed and (mrz_dict is None or _score(parsed) > _score(mrz_dict)):
+                    mrz_dict, ocr_text, ocr_engine = parsed, text, engine.get_name()
+                if mrz_dict and _score(mrz_dict) >= 1.0:
+                    break
+
+        # --- Slow fallback (only if the strip gave no MRZ): full-page OCR, PaddleOCR then EasyOCR ---
+        if mrz_dict is None:
+            ocr_text = ""
+            ocr_engine = None
+
+            if self.paddle.is_available():
+                try:
+                    ocr_text = self.paddle.extract_text(image_path)
+                    ocr_engine = "paddle"
+                    logger.info("PaddleOCR completed")
+                except OCRError as e:
+                    logger.warning("PaddleOCR failed", error=str(e))
+
+            if not ocr_text and self.easyocr.is_available():
+                try:
+                    ocr_text = self.easyocr.extract_text(image_path)
+                    ocr_engine = "easyocr"
+                    logger.info("EasyOCR completed")
+                except OCRError as e:
+                    logger.warning("EasyOCR failed", error=str(e))
+
+            if not ocr_text:
+                raise ExtractionError("No OCR engine produced output")
+
+            # Try MRZ from primary OCR
+            mrz_dict = _try_parse_mrz(ocr_text)
+
+            # If PaddleOCR got text but MRZ parsing failed, retry with EasyOCR
+            if mrz_dict is None and ocr_engine == "paddle" and self.easyocr.is_available():
+                logger.info("PaddleOCR MRZ parse failed — retrying with EasyOCR")
+                try:
+                    easy_text = self.easyocr.extract_text(image_path)
+                    if easy_text:
+                        mrz_dict = _try_parse_mrz(easy_text)
+                        if mrz_dict:
+                            ocr_text = easy_text
+                            ocr_engine = "easyocr"
+                except Exception as e:
+                    logger.warning("EasyOCR fallback failed", error=str(e))
+
+        result["ocr_engine_used"] = ocr_engine
 
         if mrz_dict is not None:
             result["mrz_data"] = mrz_dict

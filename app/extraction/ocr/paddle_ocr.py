@@ -65,6 +65,30 @@ class PaddleOCREngine(BaseOCREngine):
         """Get the engine name."""
         return "paddle"
 
+    def extract_mrz_text(self, mrz_strip: Any) -> str:
+        """OCR a pre-cropped MRZ strip (PIL image) only (fast path). Returns text in the mrz + NUL-separated format."""
+        if not self.is_available():
+            raise OCRError("PaddleOCR is not available")
+        try:
+            import os
+            import tempfile
+
+            ocr = self._get_ocr()
+            with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+                mrz_strip.save(tmp.name)
+                tmp_path = tmp.name
+            try:
+                lines: list[str] = []
+                for page in ocr.predict(tmp_path):
+                    if page is not None:
+                        lines.extend(t for t in (_page_field(page, "rec_texts") or []) if t)
+            finally:
+                os.unlink(tmp_path)
+            return "\n".join(lines) + "\x00"
+        except Exception as e:
+            logger.error("PaddleOCR MRZ strip extraction failed", error=str(e))
+            raise OCRError(f"PaddleOCR extraction failed: {e}") from e
+
     def extract_text(self, image_path: Path) -> str:
         """Extract all text from an image.
 

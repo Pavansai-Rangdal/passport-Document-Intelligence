@@ -3,11 +3,16 @@
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from PIL import Image
+
 from app.core.exceptions import OCRError
 from app.core.logging import get_logger
 from app.extraction.ocr.base import BaseOCREngine
 
 logger = get_logger(__name__)
+
+_MRZ_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789<"
 
 
 class EasyOCREngine(BaseOCREngine):
@@ -38,6 +43,19 @@ class EasyOCREngine(BaseOCREngine):
 
     def get_name(self) -> str:
         return "easyocr"
+
+    def extract_mrz_text(self, mrz_strip: Image.Image) -> str:
+        """OCR a pre-cropped MRZ strip only (fast path). Returns text in the mrz + NUL-separated format."""
+        if not self.is_available():
+            raise OCRError("EasyOCR is not available")
+        try:
+            results = self._get_reader().readtext(
+                np.array(mrz_strip), detail=0, paragraph=False, allowlist=_MRZ_CHARS, width_ths=0.3,
+            )
+            return "\n".join(str(r) for r in results) + "\x00"
+        except Exception as e:
+            logger.error("EasyOCR MRZ strip extraction failed", error=str(e))
+            raise OCRError(f"EasyOCR extraction failed: {e}") from e
 
     def extract_text(self, image_path: Path) -> str:
         """Extract text from image using EasyOCR.
